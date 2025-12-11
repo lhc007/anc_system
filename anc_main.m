@@ -65,6 +65,7 @@ else
     % 理论延迟：40cm 管道，声速 343m/s → ≈1.17ms → 56 样本 @48kHz
     delayD = round(0.0012 * cfg.fs) + cfg.delayMarginSamples;
 end
+
 delayD = max(delayD, cfg.minDelaySamples);
 delayD = min(delayD, cfg.maxDelaySamples);  % ← 新增上限
 fprintf('ℹ️ 初始延迟 D=%d 样本 (≈ %.2f ms)\n', delayD, 1000*delayD/cfg.fs);
