@@ -88,11 +88,11 @@ for spk=1:cfg.numSpeakers
         
         % === 构建 4 通道激励信号（仅当前扬声器有信号）===
         outAll = zeros(totalSamples, 4);
-        switch spk
-            case 1, outAll(:,1) = sweepSig;
-            case 2, outAll(:,2) = sweepSig;
-            case 3, outAll(:,3) = sweepSig;
-            case 4, outAll(:,4) = sweepSig;
+        ampVec = cfg.spkAmplitude(:)'; % [1.0, 1.0, 1.5, 1.5]
+        for ch = 1:4
+            if spk == ch
+                outAll(:, ch) = ampVec(ch) * sweepSig;
+            end
         end
         
         % 归一化防削波

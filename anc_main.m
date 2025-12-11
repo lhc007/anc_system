@@ -82,6 +82,7 @@ end
 
 %% 监控带通滤波器
 [b_bp,a_bp] = butter(4, [cfg.bandFreqLow cfg.bandFreqHigh]/(cfg.fs/2),'bandpass');
+refUsed = filter(b_lp, a_lp, refUsed);        % 应用于参考信号
 bpRefState = zeros(max(length(a_bp),length(b_bp))-1, numRef);
 bpErrState = zeros(max(length(a_bp),length(b_bp))-1, numErr);
 
@@ -159,6 +160,12 @@ for frameIdx = 1:totalFrames
         refUsed = refRaw;
     end
     
+    % 【新增】低通滤波：聚焦马路噪音（<1 kHz）
+    if isfield(cfg, 'ancLowpassHz')
+        [b_lp, a_lp] = butter(4, cfg.ancLowpassHz / (cfg.fs/2));
+        refUsed = filter(b_lp, a_lp, refUsed);
+    end
+
     % 反馈泄漏抵消
     if cfg.useFeedbackLeakCancel
         fbEst = zeros(size(refUsed));

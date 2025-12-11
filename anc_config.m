@@ -42,8 +42,10 @@ cfg = struct();
 %% 基础系统参数
 cfg.fs               = 48000;       %16000->48000
 cfg.frameSize        = 128;         % 小帧以降低延迟；若收敛慢可增大到 128或256
-cfg.timeFilterLen    = 256;         % 控制滤波器长度；若次级路径较长，建议 128 或 256
+cfg.timeFilterLen    = 3072;         % 控制滤波器长度；若次级路径较长，建议 128 或 256
 cfg.numSpeakers      = 4;
+% 限制 ANC 带宽（聚焦马路噪音）
+cfg.ancLowpassHz = 1000;   % 新增字段：ANC 工作上限频率
 
 % 硬件设备
 cfg.micDeviceName          = '六通道麦克风阵列 (YDM6MIC Audio)';
@@ -72,22 +74,25 @@ cfg.micChannels.reference  = [1 2 3 4];
 cfg.micChannels.error      = [5 6];
 
 %% 文件路径（明确区分输入/输出）
-cfg.inputAudioFile    = 'anc_simulation_output.wav';        % ← 输入噪声（多通道）
-cfg.secondaryPathFile = 'secondary_path.mat';           % 次级路径地址
-cfg.feedbackPathFile  = 'feedback_path.mat';            % 反馈路径
+cfg.inputAudioFile    = 'noise/anc_sim_data_road_noise.wav';        % ← 输入噪声（多通道）
+cfg.secondaryPathFile = 'secondary_path/secondary_path.mat';           % 次级路径地址
+cfg.feedbackPathFile  = 'feedback_path/feedback_path.mat';            % 反馈路径
 cfg.logFile           = 'anc_run_log.mat';              %运行日志
 cfg.outputAudioFile   = 'anc_output.wav';   % ← 仿真输出
 cfg.noiseFile = 'road_noise.wav';           %初始噪音文件
 
 
 %% 次级路径录制（ 测量专用参数）
+
+cfg.spkAmplitude = [1.0, 1.0, 1.3, 1.3]; % 默认为 1.0
+
 cfg.repetitions = 4;               % 增加重复测量次数，提高统计可靠性
 cfg.timeFrameSamples = 512;         % 帧大小
 cfg.irMaxLen              = 4096;
 cfg.preRollFrames         = 8;
 cfg.tailNoiseLen          = 512;
 cfg.saveFirstRaw          = true;
-cfg.saveAllRaw            = false;
+cfg.saveAllRaw            = true;    %保存次级路径原始录音
 cfg.doAlignRepeats        = false;   % 保留真实延迟
 cfg.exportAlignedIR       = true;    % 诊断用对齐 IR
 cfg.preSilenceSec         = 0.50;
@@ -106,7 +111,7 @@ cfg.snrThresholdDB           = 8;
 
 % 可靠峰判定参数
 cfg.reliableMinRatio        = 0.50;       % 适当降低可靠比例阈值
-cfg.reliableMaxIQR          = 40;           % 适当放宽IQR阈值
+cfg.reliableMaxIQR          = 800;           % 适当放宽IQR阈值
 cfg.filterTailFraction      = 0.5;
 cfg.enableOutlierReject     = true;
 cfg.outlierIQRMultiplier    = 1.2;    % 更严格地剔除离群点
@@ -128,14 +133,14 @@ cfg.deconvFftCorrEnable    = true;
 % sweepCfg参数
 cfg.padLeading = 0.25;
 cfg.padTrailing = 0.25;
-cfg.amplitude = 0.8;
+cfg.amplitude = 0.5;
 
 %% ========== 反馈路径测量参数 (Feedback Path) ==========
 % 扫频信号设置
 cfg.fbSweepDur        = 3.2;          % 扫频时长 (秒) → 对应 153600 样本 @48kHz
 cfg.fbSweepFstart     = 100;          % 起始频率 (Hz)，避开极低频噪声
 cfg.fbSweepFend       = 8000;         % 截止频率 (Hz)，覆盖主要控制带宽
-cfg.fbSweepNsweeps    = 1;            % 重复测量次数，用于平均降噪
+cfg.fbSweepNsweeps    = 2;            % 重复测量次数，用于平均降噪
 cfg.feedbackIRLenSec = 0.5;           % 500 毫秒
 
 % 频率加权（增强低频信噪比）
@@ -172,8 +177,8 @@ cfg.delayMarginSamples     = 12;      % 若出现相位/延迟抖动，可提升
 cfg.weight_decay           = 1e-5;
 cfg.maxWeightAbs           = 0.05;
 
-%% 反馈泄漏相关
-cfg.useFeedbackLeakCancel  = true;
+%% 反馈泄漏相关（是否使用反馈泄漏抵消功能）
+cfg.useFeedbackLeakCancel  = false;
 
 %% 监控频段
 cfg.bandFreqLow            = 20;
