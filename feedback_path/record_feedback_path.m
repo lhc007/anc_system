@@ -205,6 +205,9 @@ function record_feedback_path()
         F = zeros(L_f, numRef, numSpk);
         F(1:currentLen, :, :) = alignedIR;
     end
+    
+    % 👇 新增：检查反馈路径可用性
+    check_feedback_path(F, delayEst, fs, numRef, numSpk);
 
     % 保存 F（这才是 ANC 系统需要的反馈路径）
     save(cfg.feedbackPathFile, 'F');

@@ -47,12 +47,12 @@ else
 end
 
 % 函数提示
-needed = {'fxlms_recursive','anc_plot_results'};
-for i=1:numel(needed)
-    if exist(needed{i},'file')~=2
-        fprintf('⚠️ 警告：函数 %s 不在路径上（相关功能不可用）\n', needed{i});
-    end
-end
+% needed = {'fxlms_recursive','anc_plot_results'};
+% for i=1:numel(needed)
+%     if exist(needed{i},'file')~=2
+%         fprintf('⚠️ 警告：函数 %s 不在路径上（相关功能不可用）\n', needed{i});
+%     end
+% end
 
 if ok
     fprintf('🎉 所有依赖项检查通过！可以安全运行仿真。\n');
