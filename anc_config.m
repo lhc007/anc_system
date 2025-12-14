@@ -43,7 +43,7 @@ cfg = struct();
 cfg.fs               = 48000;       %16000->48000
 cfg.frameSize        = 128;         % 小帧以降低延迟；若收敛慢可增大到 128或256
 cfg.timeFilterLen    = 3072;         % 控制滤波器长度；若次级路径较长，建议 128 或 256
-cfg.numSpeakers      = 4;
+cfg.numSpeakers      = 2;       %先用两个扬声器做测试效果合格在改为四个
 % 限制 ANC 带宽（聚焦马路噪音）
 cfg.ancLowpassHz = 1000;   % 新增字段：ANC 工作上限频率
 
@@ -51,6 +51,8 @@ cfg.ancLowpassHz = 1000;   % 新增字段：ANC 工作上限频率
 cfg.micDeviceName          = '六通道麦克风阵列 (YDM6MIC Audio)';
 cfg.spkDevice1Name         = '扬声器 (USB Audio Device)';
 cfg.spkDevice2Name         = '扬声器2 (Realtek(R) Audio)';
+% 扬声器映射简化：只指定通道号（1~4）
+cfg.spkChannels = [1, 2, 3, 4];  % Spk1→Ch1, Spk2→Ch2, Spk3→Ch3, Spk4→Ch4
 
 %% 扬声器映射（关键！）
 % 每个扬声器指定其输出设备和通道 格式: {设备名称, 输出通道索引 (1=左, 2=右)}
@@ -60,12 +62,6 @@ cfg.spkMapping = {
     {'扬声器2 (Realtek(R) Audio)', 1};  % 扬声器 3 → Realtek 左(右上)
     {'扬声器2 (Realtek(R) Audio)', 2}   % 扬声器 4 → Realtek 右(右下)
     };
-
-% IO 驱动（根据你的系统设置为 "ASIO" 或 "WASAPI"） === 扬声器：全部通过 ASIO4ALL 聚合 ===
-cfg.deviceName = 'ASIO4ALL v2';   % ← 统一设备名
-cfg.deviceType = 'ASIO';
-% 扬声器映射简化：只指定通道号（1~4）
-cfg.spkChannels = [1, 2, 3, 4];  % Spk1→Ch1, Spk2→Ch2, Spk3→Ch3, Spk4→Ch4
 
 
 %% 麦克风与通道映射
@@ -84,34 +80,35 @@ cfg.noiseFile = 'road_noise.wav';           %初始噪音文件
 
 %% 次级路径录制（ 测量专用参数）
 
-cfg.spkAmplitude = [1.0, 1.0, 1.3, 1.3]; % 默认为 1.0
+cfg.spkAmplitude = [1.2, 1.2]; % 默认为 1.0
 
 cfg.repetitions = 4;               % 增加重复测量次数，提高统计可靠性
-cfg.timeFrameSamples = 512;         % 帧大小
+cfg.timeFrameSamples = 512;         % 帧大小 必须是 2 的幂，且与 ASIO buffer 匹配
 cfg.irMaxLen              = 4096;
-cfg.preRollFrames         = 8;
+cfg.preRollFrames         = 20;  % 预热帧
 cfg.tailNoiseLen          = 512;
 cfg.saveFirstRaw          = true;
 cfg.saveAllRaw            = true;    %保存次级路径原始录音
 cfg.doAlignRepeats        = false;   % 保留真实延迟
 cfg.exportAlignedIR       = true;    % 诊断用对齐 IR
-cfg.preSilenceSec         = 0.50;
-cfg.postSilenceSec        = 0.20;
+cfg.preSilenceSec         = 0.8;
+cfg.postSilenceSec        = 0.4;
 cfg.writeBlockPad         = true;
 
 % 峰与漂移相关参数
 cfg.enableLowFreqBoost       = true;
-cfg.lowFreqCutHz             = 180;
-cfg.lowFreqMixRatio          = 0.45;
-cfg.minPhysDelaySamples      = 12;
-cfg.maxAllowedDriftSamples   = 8;
+cfg.lowFreqCutHz             = 150;
+cfg.lowFreqMixRatio          = 0.9;     % 90% 能量集中在低频
+cfg.minPhysDelaySamples      = 50;
+cfg.maxAllowedDriftSamples   = 200;
 cfg.enableRepeatAlignment    = true;
-cfg.excludeLowSNR            = false;
-cfg.snrThresholdDB           = 8;
+% SNR 排除：尝试剔除低 SNR 重复
+cfg.excludeLowSNR            = true;
+cfg.snrThresholdDB           = 6;
 
 % 可靠峰判定参数
-cfg.reliableMinRatio        = 0.50;       % 适当降低可靠比例阈值
-cfg.reliableMaxIQR          = 800;           % 适当放宽IQR阈值
+cfg.reliableMinRatio        = 0.30;         % 可靠比例阈值
+cfg.reliableMaxIQR          = 1200;          % 适当放宽IQR阈值
 cfg.filterTailFraction      = 0.5;
 cfg.enableOutlierReject     = true;
 cfg.outlierIQRMultiplier    = 1.2;    % 更严格地剔除离群点
@@ -120,20 +117,21 @@ cfg.outlierIQRMultiplier    = 1.2;    % 更严格地剔除离群点
 cfg.deconvExtraTail        = cfg.irMaxLen + 3000;
 cfg.prePeakKeep            = 32;
 cfg.deconvPreDelayKeep     = 768;
-cfg.deconvPeakThreshDB     = 5;
+cfg.deconvPeakThreshDB     = 3;      % 从 5 -> 3（低 SNR 下更易检测峰值）
 cfg.deconvMaxSearch        = 9000;
-cfg.deconvRegEps           = 1e-4;
-cfg.deconvNoiseWin         = 600;
+cfg.deconvRegEps           = 1e-3;  % 从 1e-4 -> 1e-3 提升数值稳定性（避免放大噪声）
+cfg.deconvNoiseWin         = 1200;  % 从 600 -> 1200，长窗更好估计噪声
 cfg.envSmoothWin           = 10;
 cfg.deconvCumEnergyFrac    = 0.05;
-cfg.deconvMinPeakFrac      = 0.008;
+cfg.deconvMinPeakFrac      = 0.005;
 cfg.deconvSnrBodyRadius    = 96;
 cfg.deconvFftCorrEnable    = true;
 
 % sweepCfg参数
 cfg.padLeading = 0.25;
 cfg.padTrailing = 0.25;
-cfg.amplitude = 0.5;
+cfg.amplitude = 0.98;
+cfg.sweepDuration = 16;
 
 %% ========== 反馈路径测量参数 (Feedback Path) ==========
 % 扫频信号设置
@@ -173,7 +171,7 @@ cfg.useNLMS                = false;
 cfg.enableMinPhaseInit     = false;
 
 %% 延迟与稳定性
-cfg.delayMarginSamples     = 12;      % 若出现相位/延迟抖动，可提升到 8~16
+cfg.delayMarginSamples     = 16;      % 若出现相位/延迟抖动，可提升到 8~16
 cfg.weight_decay           = 1e-5;
 cfg.maxWeightAbs           = 0.05;
 
@@ -188,7 +186,7 @@ cfg.bandFreqHigh           = 800;
 cfg.maxOutput              = 0.3;
 
 %% 运行日志
-cfg.statusPrintFrames      = 200;
+cfg.statusPrintFrames      = 100;
 cfg.logging                = true;
 
 %% 离线仿真相关

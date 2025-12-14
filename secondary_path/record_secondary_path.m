@@ -10,7 +10,7 @@ clear; clc;
 cfg = anc_config();
 
 % Sweep
-sweepCfg = struct('fs',cfg.fs,'T',2.0,'f1',20,'f2',6000,...
+sweepCfg = struct('fs',cfg.fs,'T',cfg.sweepDuration,'f1',20,'f2',1200,...
     'padLeading',cfg.padLeading,'padTrailing',cfg.padTrailing,'amplitude',cfg.amplitude);
 
 % deconvolve 参数
@@ -30,7 +30,7 @@ deconvParams = struct( ...
 );
 
 fprintf('[measure] 初始化硬件...\n');
-hw = hardware_init_measure(cfg);  % ← 现在只返回 reader + writer（4ch）
+hw = hardware_init_measure(cfg); 
 
 %% ============== 生成 Sweep ==============
 fprintf('[measure] 生成 ESS sweep...\n');
@@ -73,23 +73,22 @@ allIrRepList = cell(cfg.numSpeakers,1);
 for spk=1:cfg.numSpeakers
     fprintf('\n[measure] ===== 扬声器 %d =====\n', spk);
     irRepList = zeros(Lh,cfg.micNumChannels,cfg.repetitions);
-
-    repDelaysRaw      = zeros(cfg.repetitions,1);
-    repDelaysCorr     = zeros(cfg.repetitions,1);
-    repPeakLists      = cell(cfg.repetitions,1);
-    repPeakReliable   = cell(cfg.repetitions,1);
-    repSNRlist        = zeros(cfg.repetitions,cfg.micNumChannels);
-    repDiscardRepeat  = false(cfg.repetitions,1);
+    repGlobalShifts         = zeros(cfg.repetitions,1);       % 全局偏移（用于漂移分析）
+    repPeakLists_raw        = cell(cfg.repetitions,1);        % 原始峰值（用于延迟估计）
+    repPeakLists_forIR      = cell(cfg.repetitions,1);        % 用于IR的峰值（可能被 minPhysDelay 修正）
+    repPeakReliable         = cell(cfg.repetitions,1);
+    repSNRlist              = zeros(cfg.repetitions,cfg.micNumChannels);
+    repDiscardRepeat        = false(cfg.repetitions,1);
 
     refDelay = NaN;
 
     for rep=1:cfg.repetitions
         fprintf('[measure]  播放重复 %d/%d...\n', rep,cfg.repetitions);
         
-        % === 构建 4 通道激励信号（仅当前扬声器有信号）===
-        outAll = zeros(totalSamples, 4);
+        % === 构建激励信号（仅当前扬声器有信号）===
+        outAll = zeros(totalSamples, cfg.numSpeakers);
         ampVec = cfg.spkAmplitude(:)'; % [1.0, 1.0, 1.5, 1.5]
-        for ch = 1:4
+        for ch = 1:cfg.numSpeakers
             if spk == ch
                 outAll(:, ch) = ampVec(ch) * sweepSig;
             end
@@ -107,7 +106,7 @@ for spk=1:cfg.numSpeakers
         
         % 预热：发送静音
         for pr = 1:cfg.preRollFrames
-            hw.writer(zeros(blockSize, 4));  % ← 4 通道零信号
+            hw.writer(zeros(blockSize, cfg.numSpeakers));
             hw.reader();
         end
         
@@ -136,18 +135,18 @@ for spk=1:cfg.numSpeakers
             rawRecordings{spk,rep} = recorded;
         end
 
-        % 延迟估计（使用第一个麦克风）
+        % === 估计重复间的全局时间偏移（用于后续对齐）===
         [cLag, lagsLag] = xcorr(recorded(:,1), sweepSig);
         [~, iLag] = max(cLag);
-        delayCorr = lagsLag(iLag);
-        repDelaysRaw(rep) = delayCorr;
+        globalShift = lagsLag(iLag);
+        repGlobalShifts(rep) = globalShift;
         if rep == 1
-            refDelay = delayCorr;
+            refDelay = globalShift;  % ✅ 修正：使用 globalShift
         end
 
         % 重复对齐（可选）
         if cfg.enableRepeatAlignment
-            shiftSamples = delayCorr - refDelay;
+            shiftSamples = globalShift - refDelay;  % ✅ 修正
             if abs(shiftSamples) > 2000
                 fprintf('[warn]  Spk%d Rep%d 延迟差过大 shift=%d 标记剔除重复\n', spk, rep, shiftSamples);
                 repDiscardRepeat(rep) = true;
@@ -160,17 +159,14 @@ for spk=1:cfg.numSpeakers
             else
                 recordedShift = recorded;
             end
-            [c2, l2] = xcorr(recordedShift(:,1), sweepSig);
-            [~, i2] = max(c2);
-            repDelaysCorr(rep) = l2(i2);
         else
             recordedShift = recorded;
-            repDelaysCorr(rep) = delayCorr;
         end
 
         % 反卷积 & IR 提取
         irCurrent = zeros(Lh, cfg.micNumChannels);
-        peakIdxEach = zeros(cfg.micNumChannels, 1);
+        peakIdxEach_raw = zeros(cfg.micNumChannels, 1);
+        peakIdxEach_forIR = zeros(cfg.micNumChannels, 1);
         peakRelEach = false(cfg.micNumChannels, 1);
         snrMic = zeros(cfg.micNumChannels, 1);
 
@@ -178,29 +174,32 @@ for spk=1:cfg.numSpeakers
             rec_m = recordedShift(:, m);
             outStruct = deconvolve_sweep(rec_m, sweepSig, cfg.fs, deconvParams);
             h_full = outStruct.h;
-            pk = outStruct.peakIdx;
+            pk_raw = outStruct.peakIdx;
             reliable = isfield(outStruct, 'peakReliability') && outStruct.peakReliability;
 
-            % 强制最小物理延迟
-            if pk < cfg.minPhysDelaySamples
+            peakIdxEach_raw(m) = pk_raw;
+
+            % === 强制最小物理延迟（仅用于生成干净的平均IR）===
+            pk_forIR = pk_raw;
+            if pk_forIR < cfg.minPhysDelaySamples
                 searchStart = min(cfg.minPhysDelaySamples, length(h_full));
                 searchEnd = min(searchStart + 400, length(h_full));
                 if searchEnd > searchStart
                     [~, altRel] = max(abs(h_full(searchStart:searchEnd)));
                     pkAlt = searchStart + altRel - 1;
-                    if pkAlt > pk && abs(h_full(pkAlt)) > 0.5 * max(abs(h_full))
-                        pk = pkAlt;
+                    if pkAlt > pk_forIR && abs(h_full(pkAlt)) > 0.5 * max(abs(h_full))
+                        pk_forIR = pkAlt;
                         reliable = true;
-                        fprintf('[adjust] Spk%d Rep%d Mic%d 延迟重定位 %d -> %d\n', ...
-                            spk, rep, m, outStruct.peakIdx, pk);
+                        fprintf('[adjust] Spk%d Rep%d Mic%d 延迟重定位 %d -> %d (for IR only)\n', ...
+                            spk, rep, m, pk_raw, pk_forIR);
                     end
                 end
             end
-            if pk < cfg.minPhysDelaySamples
+            if pk_forIR < cfg.minPhysDelaySamples
                 reliable = false;
             end
 
-            peakIdxEach(m) = pk;
+            peakIdxEach_forIR(m) = pk_forIR;
             peakRelEach(m) = reliable;
             snrMic(m) = outStruct.snrEst;
 
@@ -208,30 +207,31 @@ for spk=1:cfg.numSpeakers
             irCurrent(1:Luse, m) = h_full(1:Luse);
         end
 
-        repPeakLists{rep} = peakIdxEach;
+        repPeakLists_raw{rep} = peakIdxEach_raw;
+        repPeakLists_forIR{rep} = peakIdxEach_forIR;
         repPeakReliable{rep} = peakRelEach;
         repSNRlist(rep, :) = snrMic;
 
-        fprintf('[measure]  Spk%d Rep%d rawDelay=%d alignedDelay=%d 峰均值=%.1f reliableRatio=%.2f SNR(med)=%.2f discard=%d\n', ...
-            spk, rep, delayCorr, repDelaysCorr(rep), mean(peakIdxEach), mean(peakRelEach), median(snrMic), repDiscardRepeat(rep));
+        % ✅ 修正打印：使用正确变量
+        fprintf('[measure]  Spk%d Rep%d globalShift=%d 峰均值=%.1f reliableRatio=%.2f SNR(med)=%.2f discard=%d\n', ...
+            spk, rep, globalShift, mean(peakIdxEach_raw), mean(peakRelEach), median(snrMic), repDiscardRepeat(rep));
 
         irRepList(:, :, rep) = irCurrent;
     end
 
-    driftRaw = max(repDelaysRaw) - min(repDelaysRaw);
-    driftCorr = max(repDelaysCorr) - min(repDelaysCorr);
-    driftStable = driftCorr <= cfg.maxAllowedDriftSamples;
+    driftRaw = max(repGlobalShifts) - min(repGlobalShifts);
+    driftStable = driftRaw <= cfg.maxAllowedDriftSamples;
     if ~driftStable
-        fprintf('[warn]  Spk%d 漂移不稳定 raw=%d corr=%d\n', spk, driftRaw, driftCorr);
+        fprintf('[warn]  Spk%d 漂移不稳定 (range=%d samples)\n', spk, driftRaw);
     else
-        fprintf('[measure] Spk%d 漂移稳定 raw=%d corr=%d\n', spk, driftRaw, driftCorr);
+        fprintf('[measure] Spk%d 漂移稳定 (range=%d samples)\n', spk, driftRaw);
     end
 
-    % 可靠峰值统计
+    % 可靠峰值统计（使用原始峰值）
     reliablePeaksAll = [];
     for rep = 1:cfg.repetitions
         if repDiscardRepeat(rep), continue; end
-        pkList = repPeakLists{rep};
+        pkList = repPeakLists_raw{rep};
         relMask = repPeakReliable{rep};
         reliablePeaksAll = [reliablePeaksAll; pkList(relMask)];
     end
@@ -326,12 +326,11 @@ for spk=1:cfg.numSpeakers
 
     % 元数据
     spkMeta = struct();
-    spkMeta.repDelaysRaw            = repDelaysRaw;
-    spkMeta.repDelaysCorr           = repDelaysCorr;
+    spkMeta.repGlobalShifts         = repGlobalShifts;
     spkMeta.driftRaw                = driftRaw;
-    spkMeta.driftCorr               = driftCorr;
     spkMeta.driftStable             = driftStable;
-    spkMeta.irRepPeaks              = repPeakLists;
+    spkMeta.irRepPeaks_raw          = repPeakLists_raw;
+    spkMeta.irRepPeaks_forIR        = repPeakLists_forIR;
     spkMeta.irRepPeakReliable       = repPeakReliable;
     spkMeta.irRepSNR                = repSNRlist;
     spkMeta.irAvgPeakPos            = peakPosAvgPerMic;
@@ -396,10 +395,11 @@ fprintf('[measure] 推荐延迟向量: %s\n', mat2str(recommendedVector));
 %% 汇总输出
 for spk = 1:cfg.numSpeakers
     s = meta.perSpeaker{spk};
-    fprintf('[final] Spk%d usable=%d relMedian=%d IQR=%s ratio=%.2f avgDelay=%d relDelay=%d filtLen=%d driftCorr=%d\n', ...
+    fprintf('[final] Spk%d usable=%d relMedian=%d IQR=%s ratio=%.2f avgDelay=%d relDelay=%d filtLen=%d\n', ...
         spk, s.usable, s.reliableMedian, num2str(s.reliableIQR), s.reliableRatioAll, ...
-        s.recommendedDelayFromAvg, s.recommendedDelayReliable, s.recommendedFilterLen, s.driftCorr);
+        s.recommendedDelayFromAvg, s.recommendedDelayReliable, s.recommendedFilterLen);
 end
 
 try hw.release(); catch; end
 fprintf('[measure] Done.\n');
+check_secondary_path(cfg.secondaryPathFile);
