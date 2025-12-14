@@ -10,7 +10,7 @@ clear; clc;
 cfg = anc_config();
 
 % Sweep
-sweepCfg = struct('fs',cfg.fs,'T',cfg.sweepDuration,'f1',20,'f2',1200,...
+sweepCfg = struct('fs',cfg.fs,'T',cfg.sweepDuration,'f1',cfg.sweepF1,'f2',cfg.sweepF2,...
     'padLeading',cfg.padLeading,'padTrailing',cfg.padTrailing,'amplitude',cfg.amplitude);
 
 % deconvolve 参数

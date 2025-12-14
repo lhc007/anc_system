@@ -1,6 +1,5 @@
 %% test_speaker_for_anc.m
-% 专为 ANC 次级路径扬声器测试设计（R2025a 兼容）
-
+% 测试扬声器播放强度
 clear; clc;
 
 fs = 48000;
