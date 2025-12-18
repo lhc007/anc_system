@@ -194,7 +194,7 @@ try
         end
         fprintf('[measure]  Spk%d refDelay set to %d samples (median of globalShift)\n', spk, refDelay);
 
-        max(cfg.minPhysDelaySamples/2, cfg.maxAllowedDriftSamples)
+        alignThreshold = max(cfg.minPhysDelaySamples/2, cfg.maxAllowedDriftSamples);
         for rep = 1:cfg.repetitions
             if isnan(repGlobalShifts(rep)) || abs(repGlobalShifts(rep)-refDelay) > alignThreshold
                 repDiscardRepeat(rep) = true;
@@ -357,7 +357,7 @@ try
 
 catch ME
     fprintf('[ERROR] %s\n', ME.message);
-    finally
+finally
     if ~isempty(hw)
         try
             hw.release();
