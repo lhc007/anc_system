@@ -61,6 +61,14 @@ for r = 1:nr
     end
 end
 
+% === Step X: 初始化 xfHistory（用于跨帧 Filtered-X 历史）===
+if cfg.timeFilterLen > 1
+    Lw = cfg.timeFilterLen;
+    st.xfHistory = zeros(Lw-1, nr, cfg.numSpeakers, ne); % [Lw-1 x nr x ns x ne]
+else
+    st.xfHistory = [];
+end
+
 % === Step 6: 配置参数（安全读取）===
 st.mu = getfieldOrDefault(cfg, 'muInit', 0.01);
 st.useNLMS = getfieldOrDefault(cfg, 'useNLMS', false);

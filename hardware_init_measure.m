@@ -20,10 +20,14 @@ end
 
 % === 扬声器写入器 ===
 try
-    w = audioDeviceWriter('Device', cfg.spkDevice2Name,'SampleRate', cfg.fs);
+    w = audioDeviceWriter(...
+        'Device', cfg.spkDevice2Name, ...
+        'SampleRate', cfg.fs, ...
+        'ChannelMappingSource', 'Property', ...
+        'ChannelMapping', [1, 2]);
 catch ME
     try release(rdr); catch; end
-    error('[hardware-measure] audioDeviceWriter (ASIO) 创建失败: %s\n可能原因：\n1. ASIO4ALL 未安装\n2. 设备未在 ASIO4ALL 中启用\n3. 其他程序占用了音频设备', ME.message);
+    error('[hardware-measure] audioDeviceWriter  创建失败: %s\n', ME.message);
 end
 
 % 封装接口
@@ -33,7 +37,7 @@ hw.release = @() releaseAll(rdr, w);
 
 fprintf('[hardware-measure] 设备初始化完成:\n');
 fprintf('  麦克风: %s\n', cfg.micDeviceName);
-fprintf('  扬声器: %s (ASIO, 4ch)\n', cfg.spkDevice2Name);
+fprintf('  扬声器: %s\n', cfg.spkDevice2Name);
 end
 
 % --- 辅助函数 ---

@@ -1,42 +1,41 @@
-% 主仿真入口：多通道前馈宽带 ANC + 在线次级路径建模
+% 主仿真入口：多通道前馈 ANC + 在线次级路径建模 + 自适应延迟
 clear; clc;
 cfg = anc_config();
 if ~check_anc_dependencies(cfg), return; end
 
-%% 加载输入噪声（多通道）
-[inputAudio, fs_in] = audioread(cfg.inputAudioFile);  % ← 修正：使用 inputAudioFile
+%% ----------------- 加载输入音频 -----------------
+[inputAudio, fs_in] = audioread(cfg.inputAudioFile);
 if fs_in ~= cfg.fs
     error('输入采样率(%d)与配置(%d)不一致，请统一。', fs_in, cfg.fs);
 end
 
 % 确保通道数匹配
-expectedChans = numel(cfg.micChannels.reference) + numel(cfg.micChannels.error);
+numRef = numel(cfg.micChannels.reference);
+numErr = numel(cfg.micChannels.error);
+expectedChans = numRef + numErr;
 if size(inputAudio,2) ~= expectedChans
     error('输入音频通道数(%d) ≠ 预期(%d)', size(inputAudio,2), expectedChans);
 end
 
 totalSamples = size(inputAudio,1);
 totalFrames = ceil(totalSamples / cfg.frameSize);
-% 补零至整帧（但保留原始样本数用于输出）
 audioPadded = [inputAudio; zeros(totalFrames*cfg.frameSize - totalSamples, size(inputAudio,2))];
-numRef = numel(cfg.micChannels.reference);
-numErr = numel(cfg.micChannels.error);
 
 fprintf('✅ 输入加载完成: %d 样本, %d 帧, %d 通道\n', totalSamples, totalFrames, size(inputAudio,2));
 
-%% 加载反馈路径 F: [Lfb x numRef x numSpeakers]
+%% ----------------- 加载反馈路径 F -----------------
 loaded = load(cfg.feedbackPathFile, 'F');
 if ~isfield(loaded, 'F')
     error('反馈路径文件 "%s" 未包含变量 F', cfg.feedbackPathFile);
 end
 F = loaded.F;
+Lfb = size(F,1);
 if ndims(F) ~= 3 || size(F,2) ~= numRef || size(F,3) ~= cfg.numSpeakers
     error('反馈路径 F 维度错误，应为 [Lfb, %d, %d]', numRef, cfg.numSpeakers);
 end
-Lfb = size(F,1);
 fprintf('✅ 反馈路径 F 尺寸: [%d x %d x %d]\n', size(F));
 
-%% 加载次级路径 S: [Ls x numErr x numSpeakers]
+%% ----------------- 加载次级路径 S -----------------
 secData = load(cfg.secondaryPathFile);
 if ~isfield(secData, 'secondary')
     error('次级路径文件缺少 "secondary" 结构体');
@@ -53,61 +52,71 @@ end
 S = allIR(:, errIdx, :);
 [Ls, ne, ns] = size(S);
 if ne ~= numErr || ns ~= cfg.numSpeakers
-    error('次级路径维度不匹配: 期望 [%d, %d, %d], 实际 [%d, %d, %d]', ...
-        Ls, numErr, cfg.numSpeakers, Ls, ne, ns);
+    error('次级路径维度不匹配: 期望 [%d, %d, %d], 实际 [%d, %d, %d]', Ls, numErr, cfg.numSpeakers, Ls, ne, ns);
 end
 fprintf('✅ 初始次级路径 S 尺寸: [%d x %d x %d]\n', size(S));
 
-%% 延迟估计（更鲁棒）
+%% ----------------- 延迟估计初值 -----------------
 if isfield(sec, 'delayEstimateSamples')
     delayD = sec.delayEstimateSamples + cfg.delayMarginSamples;
 else
-    % 理论延迟：50cm 管道，声速 343m/s → ≈1.46ms → 70 样本 @48kHz
     delayD = round(0.0012 * cfg.fs) + cfg.delayMarginSamples;
 end
-
 delayD = max(delayD, cfg.minDelaySamples);
-delayD = min(delayD, cfg.maxDelaySamples);  % ← 新增上限
+delayD = min(delayD, cfg.maxDelaySamples);
 fprintf('ℹ️ 初始延迟 D=%d 样本 (≈ %.2f ms)\n', delayD, 1000*delayD/cfg.fs);
 
-%% 初始化 FXLMS
-st = fxlms_recursive_init(cfg, S, delayD, numRef, ne, ns);
+%% ----------------- 初始化 FXLMS 状态 -----------------
+st = fxlms_recursive_init(cfg, S, delayD, numRef, numErr, cfg.numSpeakers);
 
-% 初始化反馈路径状态
+% 反馈路径状态初始化（anc_main 里维护）
 st.zi_fb = cell(numRef, cfg.numSpeakers);
 for r = 1:numRef
     for s = 1:cfg.numSpeakers
-        st.zi_fb{r,s} = zeros(Lfb-1, 1);
+        st.zi_fb{r,s} = zeros(max(Lfb-1,0), 1);
     end
 end
 
-%% 监控带通滤波器
-[b_bp,a_bp] = butter(4, [cfg.bandFreqLow cfg.bandFreqHigh]/(cfg.fs/2),'bandpass');
-refUsed = filter(b_lp, a_lp, refUsed);        % 应用于参考信号
-bpRefState = zeros(max(length(a_bp),length(b_bp))-1, numRef);
-bpErrState = zeros(max(length(a_bp),length(b_bp))-1, numErr);
+% 初始化 xfHistory（确保存在并形状正确）
+if cfg.timeFilterLen > 1
+    Lw = cfg.timeFilterLen;
+    st.xfHistory = zeros(Lw-1, numRef, cfg.numSpeakers, numErr);
+end
 
-%% 功能开关默认值保护
-cfg = validate_fields(cfg, {'enableOnlineSecPath', 'enableAdaptiveDelay', 'enableBeamforming'}, false);
+% adaptive delay state placeholder
+st.adaptiveDelayState = [];
 
-%% 预分配日志
+%% ----------------- 滤波器系数预计算 -----------------
+[b_bp,a_bp] = butter(4, [cfg.bandFreqLow cfg.bandFreqHigh]/(cfg.fs/2), 'bandpass');
+bpStateLen = max(length(a_bp),length(b_bp))-1;
+bpRefState = zeros(bpStateLen, numRef);
+bpErrState = zeros(bpStateLen, numErr);
+
+use_lowpass = isfield(cfg, 'ancLowpassHz') && ~isempty(cfg.ancLowpassHz);
+if use_lowpass
+    [b_lp, a_lp] = butter(4, cfg.ancLowpassHz / (cfg.fs/2));
+end
+
+%% ----------------- 日志预分配 -----------------
 logFields = {'frame','refRms','errRms','improv','Wnorm','Wmax','mu','adaptEnable','outRms','clipping','delayD'};
 logData = struct();
 for f = 1:length(logFields)
-    logData.(logFields{f}) = zeros(totalFrames, 1);
+    logData.(logFields{f}) = zeros(totalFrames,1);
 end
 logPtr = 1;
 
-%% 初始化运行时变量
+%% ----------------- 运行时变量 -----------------
 frameCount = 0;
 baselineCollected = false;
-baselineBuffer = [];
+if ~isfield(cfg,'noiseBaselineFrames'), cfg.noiseBaselineFrames = 200; end
+baselineBuffer = zeros(cfg.noiseBaselineFrames,1);
+baselineCount = 0;
 noiseBaselineRms = NaN;
-outputBuffer = zeros(totalSamples, cfg.numSpeakers);  % 仅保存有效样本
+outputBuffer = zeros(totalSamples, cfg.numSpeakers);
 
 fprintf('【仿真启动】总帧=%d, 帧长=%d\n', totalFrames, cfg.frameSize);
 
-%% 主循环
+%% ----------------- 主循环 -----------------
 for frameIdx = 1:totalFrames
     startIdx = (frameIdx-1)*cfg.frameSize + 1;
     endIdx = startIdx + cfg.frameSize - 1;
@@ -116,17 +125,20 @@ for frameIdx = 1:totalFrames
     refRaw = frameIn(:, cfg.micChannels.reference);
     errRaw = frameIn(:, cfg.micChannels.error);
     
-    % 带通 RMS 监控
+    % 带通监控
     [refBand, bpRefState] = filter(b_bp,a_bp,refRaw,bpRefState);
     [errBand, bpErrState] = filter(b_bp,a_bp,errRaw,bpErrState);
     refRms = sqrt(mean(refBand(:).^2)+1e-12);
     errRms = sqrt(mean(errBand(:).^2)+1e-12);
     
-    % 噪声基线估计
+    % 基线估计
     if ~baselineCollected
-        baselineBuffer(end+1) = errRms;
-        if frameCount >= cfg.noiseBaselineFrames && numel(baselineBuffer) >= cfg.noiseBaselineMinCount
-            noiseBaselineRms = median(baselineBuffer);
+        baselineCount = baselineCount + 1;
+        if baselineCount <= cfg.noiseBaselineFrames
+            baselineBuffer(baselineCount) = errRms;
+        end
+        if frameCount >= cfg.noiseBaselineFrames && baselineCount >= cfg.noiseBaselineMinCount
+            noiseBaselineRms = median(baselineBuffer(1:baselineCount));
             baselineCollected = true;
             fprintf('✅ 噪声基线锁定: %.3e\n', noiseBaselineRms);
         end
@@ -144,15 +156,15 @@ for frameIdx = 1:totalFrames
     end
     st.adaptEnable = (adaptPhase >= 2);
     
-    % 步长调度
+    % 步长调度（简化）
     if frameCount <= cfg.warmupFrames
         current_mu = min(cfg.muInit + (cfg.muMax - cfg.muInit)*(frameCount/cfg.warmupFrames), cfg.muMax);
     else
-        current_mu = cfg.muMax;  % 固定最大步长（简化）
+        current_mu = cfg.muMax;
     end
     st.mu = current_mu;
     
-    % 波束成形（可选）
+    % 波束/参考使用
     if cfg.enableBeamforming
         mic_pos = (0:numRef-1) * cfg.refArraySpacing_m;
         ref_bf = reference_beamformer(refRaw, cfg.fs, mic_pos, 0);
@@ -161,17 +173,17 @@ for frameIdx = 1:totalFrames
         refUsed = refRaw;
     end
     
-    % 【新增】低通滤波：聚焦马路噪音（<1 kHz）
-    if isfield(cfg, 'ancLowpassHz')
-        [b_lp, a_lp] = butter(4, cfg.ancLowpassHz / (cfg.fs/2));
+    % 低通（若启用）
+    if use_lowpass
         refUsed = filter(b_lp, a_lp, refUsed);
     end
-
-    % 反馈泄漏抵消
+    
+    % 反馈泄漏抵消（若启用）
     if cfg.useFeedbackLeakCancel
         fbEst = zeros(size(refUsed));
         if frameIdx > 1
-            lastOut = outputBuffer(max(1,startIdx-cfg.frameSize):startIdx-1, :);
+            lastOutStart = max(1, startIdx-cfg.frameSize);
+            lastOut = outputBuffer(lastOutStart:startIdx-1, :);
             if size(lastOut,1) < cfg.frameSize
                 lastOut = [zeros(cfg.frameSize-size(lastOut,1), cfg.numSpeakers); lastOut];
             end
@@ -187,14 +199,18 @@ for frameIdx = 1:totalFrames
         refUsed = refUsed - fbEst;
     end
     
-    % 探测信号
-    probe_sig = cfg.enableOnlineSecPath * cfg.probeAmplitude * randn(cfg.frameSize, cfg.numSpeakers);
+    % 探测信号（按需生成）
+    if cfg.enableOnlineSecPath
+        probe_sig = cfg.probeAmplitude * randn(cfg.frameSize, cfg.numSpeakers);
+    else
+        probe_sig = zeros(cfg.frameSize, cfg.numSpeakers);
+    end
     
-    % FXLMS 处理
+    % FXLMS 处理（向量化函数）
     [y_out, st, dbg] = fxlms_recursive_process(st, refUsed, errRaw, cfg);
     y_total = y_out + probe_sig;
     
-    % 输出控制
+    % 输出控制 & 限幅
     if ~st.adaptEnable, y_total = y_total * 0.4; end
     y_total = y_total * outputRamp;
     peakPre = max(abs(y_total), [], 'all');
@@ -205,38 +221,75 @@ for frameIdx = 1:totalFrames
     end
     y_total = max(min(y_total, cfg.maxOutput), -cfg.maxOutput);
     
-    % 保存到有效输出缓冲区
+    % 保存到输出缓冲
     actualEnd = min(endIdx, totalSamples);
     if startIdx <= totalSamples
         outputBuffer(startIdx:actualEnd, :) = y_total(1:(actualEnd-startIdx+1), :);
     end
     
-    % 在线次级路径更新（简化条件）
-    if cfg.enableOnlineSecPath && mod(frameCount, 100) == 0
-        [S_new, ~] = online_sec_path_estimator([], probe_sig, errRaw, cfg);
-        % 更合理的更新条件：检查相关性或能量变化
-        if norm(S_new(:) - st.S(:)) / (norm(st.S(:)) + 1e-12) < 0.5
+    % 在线次级路径更新（按原逻辑/改进后的 estimator）
+    if cfg.enableOnlineSecPath && mod(frameCount, cfg.secPathUpdateFrames)==0
+        [S_new, st_sp] = online_sec_path_estimator([], probe_sig, errRaw, cfg);
+        relChange = norm(S_new(:) - st.S(:)) / (norm(st.S(:)) + 1e-12);
+        if relChange > getfieldOrDefault(cfg,'secPathUpdateRelChangeThreshold',0.5)
+            % 安全更新：替换并重置相关状态以避免尺寸不匹配
             st.S = S_new;
-            % 更新滤波器状态长度
             Ls_new = size(S_new,1);
+            % 更新 st.zi 与 st.xfHistory 大小
             for r=1:numRef
                 for s=1:cfg.numSpeakers
                     for e=1:numErr
-                        if Ls_new > 1
-                            st.zi{r,s,e} = zeros(Ls_new-1,1);
-                        else
-                            st.zi{r,s,e} = [];
+                        st.zi{r,s,e} = zeros(max(0, Ls_new-1),1);
+                        if cfg.timeFilterLen > 1
+                            st.xfHistory(:,:,s,e) = zeros(cfg.timeFilterLen-1, numRef);
                         end
                     end
                 end
             end
-            fprintf('【在线S更新】帧=%d\n', frameCount);
+            fprintf('【在线S更新】帧=%d relChange=%.3f\n', frameCount, relChange);
         end
     end
     
-    % 自适应延迟（略）
-    if cfg.enableAdaptiveDelay && frameCount > 1000 && mod(frameCount, 200)==0
-        % ...（保留原逻辑）...
+    % ----------------- 自适应延迟估计集成 -----------------
+    if cfg.enableAdaptiveDelay && frameCount > cfg.adaptiveDelayWarmupFrames && mod(frameCount, cfg.adaptiveDelayTriggerFrames) == 0
+        [newD, st.adaptiveDelayState, ad_info] = adaptive_delay_estimator(st.adaptiveDelayState, refUsed, errRaw, cfg);
+        % 如果 accepted 且与当前 delayD 有显著不同，则应用
+        if isfield(ad_info,'accepted') && ad_info.accepted && newD ~= st.delayD
+            prevD = st.delayD;
+            delta = newD - prevD;
+            % 限制单次最大变化（已在 estimator 平滑，但这里再次检查）
+            maxChange = cfg.adaptiveDelayMaxChangeSamples;
+            if abs(delta) > maxChange
+                newD = prevD + sign(delta) * maxChange;
+                delta = newD - prevD;
+            end
+            % 应用新延迟：为安全起见重置/对齐部分状态以避免跨帧不一致
+            st.delayD = newD;
+            % 重置参考缓冲与历史，以避免与新延迟不一致导致发散
+            bufferLen = st.delayD + cfg.timeFilterLen;
+            st.refBuffer = zeros(bufferLen, numRef);
+            st.refIdx = 1;
+            % 清空 xfHistory 与滤波器状态（保守策略）
+            if cfg.timeFilterLen > 1
+                st.xfHistory = zeros(cfg.timeFilterLen-1, numRef, cfg.numSpeakers, numErr);
+            end
+            for r = 1:numRef
+                for s = 1:cfg.numSpeakers
+                    for e = 1:numErr
+                        st.zi{r,s,e} = zeros(max(0, length(st.S{e,s})-1),1);
+                    end
+                end
+            end
+            fprintf('【自适应延迟】帧=%d 接受新延迟: %d (prev=%d) conf=%.2f\n', frameCount, newD, prevD, ad_info.confidence);
+            % 可选：短期内降低步长以缓冲转变带来的不稳定
+            st.mu = st.mu * 0.5;
+        else
+            % 未采纳：可记录置信度
+            if cfg.logging && isfield(ad_info,'confidence')
+                % 将置信度写入日志（简单保存到 delayD 字段的负值做示例）
+                % 更稳妥的做法是增加专门的日志结构记录 ad_info
+            end
+        end
     end
     
     % 改善量
@@ -263,52 +316,66 @@ for frameIdx = 1:totalFrames
     end
     
     % 状态打印
-    if mod(frameCount, cfg.statusPrintFrames)==0
+    if mod(frameCount, cfg.statusPrintFrames) == 0
         phaseStr = {'静音','斜坡','正常'};
         ps = phaseStr{min(adaptPhase+1,3)};
-        clipStr = clipping * '[限幅]' + ~clipping * '';
-        outRms = sqrt(mean(y_total(:).^2)+1e-12);
+        if clipping, clipStr = '[限幅]'; else clipStr = ''; end
         fprintf('【帧=%4d】阶段=%s | Ref=%.2e Err=%.2e 改善=%.1f dB | μ=%.1e | ‖W‖=%.3e | delayD=%d %s\n', ...
             frameCount, ps, refRms, errRms, improv_dB, st.mu, dbg.W_norm, st.delayD, clipStr);
     end
 end
 
-%% 结果汇总
-if baselineCollected
-    lastN = min(100, logPtr-1);
-    finalErrAvg = mean(logData.errRms(logPtr-lastN:logPtr-1));
+%% ----------------- 结果汇总与保存 -----------------
+if cfg.logging
+    recordedN = max(0, logPtr-1);
+else
+    recordedN = 0;
+end
+
+if baselineCollected && recordedN>0
+    lastN = min(100, recordedN);
+    finalErrAvg = mean(logData.errRms(recordedN-lastN+1:recordedN));
     finalImprov = 20*log10(noiseBaselineRms/(finalErrAvg+1e-12));
-    validImprov = logData.improv(1:logPtr-1);
+    validImprov = logData.improv(1:recordedN);
     validImprov = validImprov(~isnan(validImprov) & validImprov>-50);
     fprintf('\n【最终结果】基线=%.3e | 最终误差=%.3e | 改善=%.2f dB | 平均改善=%.2f dB | 最大改善=%.2f dB\n', ...
         noiseBaselineRms, finalErrAvg, finalImprov, mean(validImprov), max(validImprov));
 else
-    fprintf('\n⚠️ 未成功锁定噪声基线，无法计算最终改善。\n');
+    fprintf('\n⚠️ 未成功锁定噪声基线或无日志数据，无法计算最终改善。\n');
 end
 
-%% 保存结果
 if cfg.logging
-    % 仅保存必要字段
-    saveStruct = struct('logData', logData(1:logPtr-1), 'cfg', cfg, 'outputBuffer', outputBuffer);
+    trimmedLog = struct();
+    for f = 1:length(logFields)
+        fld = logFields{f};
+        trimmedLog.(fld) = logData.(fld)(1:recordedN);
+    end
+    saveStruct = struct('logData', trimmedLog, 'cfg', cfg, 'outputBuffer', outputBuffer);
     save(cfg.logFile, 'saveStruct');
     fprintf('✅ 日志保存: %s\n', cfg.logFile);
     
-    % 输出音频
     outAudio = outputBuffer;
     sc = max(abs(outAudio(:)));
     if sc>0, outAudio = outAudio/sc*0.95; end
-    audiowrite(cfg.outputAudioFile, outAudio, cfg.fs);  % ← 使用新字段
+    audiowrite(cfg.outputAudioFile, outAudio, cfg.fs);
     fprintf('✅ 输出音频保存: %s\n', cfg.outputAudioFile);
 end
 
-anc_plot_results(logData(1:logPtr-1));
+if cfg.logging
+    anc_plot_results(trimmedLog);
+end
+
 fprintf('\n【仿真完成】\n');
 
-%% 辅助函数
+%% ----------------- 辅助函数 -----------------
 function cfg = validate_fields(cfg, fields, defaultValue)
     for i = 1:length(fields)
         if ~isfield(cfg, fields{i})
             cfg.(fields{i}) = defaultValue;
         end
     end
+end
+
+function val = getfieldOrDefault(s, field, default)
+    if isstruct(s) && isfield(s, field), val = s.(field); else val = default; end
 end
