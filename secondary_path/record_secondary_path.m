@@ -1,5 +1,4 @@
-% record_secondary_path.m
-% 多扬声器→多误差麦克风次级路径测量（ESS）
+% record_secondary_path.m 多扬声器→多误差麦克风次级路径测量（ESS）
 % 优化点：多麦对齐、IR峰值对齐、内存控制、动态SNR、错误安全释放
 
 clear; clc;
@@ -30,13 +29,13 @@ deconvParams = struct( ...
     'minPeakFrac',   cfg.deconvMinPeakFrac, ...
     'snrBodyRadius', cfg.deconvSnrBodyRadius, ...
     'fftCorrEnable', cfg.deconvFftCorrEnable ...
-);
+    );
 
 %% ============== 初始化硬件（带安全释放）=============
 hw = [];
 try
     fprintf('[measure] 初始化硬件...\n');
-    hw = hardware_init_measure(cfg); 
+    hw = hardware_init_measure(cfg);
 
     %% ============== 生成 Sweep ==============
     fprintf('[measure] 生成 ESS sweep...\n');
@@ -101,10 +100,10 @@ try
         % === 阶段1：采集所有 repeats ===
         for rep = 1:cfg.repetitions
             fprintf('[measure]  播放重复 %d/%d...\n', rep, cfg.repetitions);
-            
+
             % === 连续指针模式播放 ===
             spkDriveSig = cfg.spkAmplitude(spk) * sweepSig(:);  % 列向量
-            
+
             % 防削波（仅针对该扬声器信号）
             maxVal = max(abs(spkDriveSig));
             if maxVal > 0.98
@@ -117,14 +116,14 @@ try
 
             % 初始化指针和录音 buffer
             ptr = 1;
-            recordedFull = zeros(numBlocks * blockSize, cfg.micNumChannels); 
-            
+            recordedFull = zeros(numBlocks * blockSize, cfg.micNumChannels);
+
             % 预热
             for pr = 1:cfg.preRollFrames
                 hw.writer(zeros(blockSize, cfg.numSpeakers));
                 hw.reader();
             end
-            
+
             % 主播放循环（连续指针）
             rdPtr = 1;
             for b = 1:numBlocks
@@ -139,7 +138,7 @@ try
                 % 播放并录制
                 hw.writer(outBlock);
                 micFrame = hw.reader();
-                
+
                 % 安全处理 micFrame 尺寸
                 if isempty(micFrame)
                     micFrame = zeros(blockSize, cfg.micNumChannels);
@@ -149,7 +148,7 @@ try
                 recordedFull(rdPtr : rdPtr + blockSize - 1, :) = micFrame;
                 rdPtr = rdPtr + blockSize;
             end
-            
+
             % 截取与原始 sweep 等长（确保后续 xcorr 对齐）
             recordedFull = recordedFull(1:totalSamples, :);
             recorded = recordedFull(:, errMicIdx);
@@ -165,8 +164,7 @@ try
             for m = 1:numErrMics
                 [c, lags] = xcorr(recorded(:,m), refSweepForXcorr, 'coeff');
 
-                % [~, idx] = max(c);
-                % lag = lags(idx);
+                % [~, idx] = max(c); lag = lags(idx);
                 validRange = (lags >= -cfg.fs*0.5) & (lags <= cfg.fs*2);  % 示例：-0.5s ~ +2s
                 if any(validRange)
                     [~, idx] = max(c(validRange));
@@ -184,35 +182,19 @@ try
 
             fprintf('[measure]  Spk%d Rep%d globalShift=%d\n', spk, rep, globalShift);
         end
-
-        % === 阶段1.5：确定 refDelay（基于 IR 峰值，而非 sweep 互相关）===
-        % 先做一次快速反卷积获取峰值
-        % tempPeaks = [];
-        % for rep = 1:cfg.repetitions
-        %     rec = repRecordedRaw{rep};
-        %     for m = 1:numErrMics
-        %         outStruct = deconvolve_sweep(rec(:,m), sweepSig, cfg.fs, deconvParams);
-        %         if isfield(outStruct, 'peakIdx')
-        %             tempPeaks(end+1) = outStruct.peakIdx; 
-        %         end
-        %     end
-        % end
-        % if ~isempty(tempPeaks)
-        %     refDelay = round(median(tempPeaks));
-        % else
-        %     refDelay = round(median(repGlobalShifts(~isnan(repGlobalShifts))));
-        % end
-
+        
         % === 阶段1.5：确定 refDelay（✅ 修复：使用 globalShift 中位数作为真实系统延迟）===
         validShifts = repGlobalShifts(~isnan(repGlobalShifts) & isfinite(repGlobalShifts));
         if ~isempty(validShifts)
             refDelay = round(median(validShifts));
+            % ✅ 新增：强制 refDelay 不小于物理最小延迟
+            refDelay = max(refDelay, cfg.minPhysDelaySamples);
         else
-            refDelay = 0;
+            refDelay = cfg.minPhysDelaySamples;  % fallback to physical min
         end
         fprintf('[measure]  Spk%d refDelay set to %d samples (median of globalShift)\n', spk, refDelay);
 
-        alignThreshold = max(2000, cfg.maxAllowedDriftSamples);
+        max(cfg.minPhysDelaySamples/2, cfg.maxAllowedDriftSamples)
         for rep = 1:cfg.repetitions
             if isnan(repGlobalShifts(rep)) || abs(repGlobalShifts(rep)-refDelay) > alignThreshold
                 repDiscardRepeat(rep) = true;
@@ -239,14 +221,17 @@ try
             snrMic = zeros(numErrMics, 1);
 
             for m = 1:numErrMics
-
-                % outStruct = deconvolve_sweep(recShift(:,m), sweepSig, cfg.fs, deconvParams);
-                
-                % 从 recShift 中提取与 sweepDrive 长度匹配的中心段（主响应应在前部）
-                L_extract = min(sweepCoreLen + 2*cfg.fs, size(recShift,1)); % 多取1~2秒以防尾部
+                % 至少覆盖 sweep + 最大 IR 长度
+                L_needed = sweepCoreLen + cfg.irMaxLen;
+                L_extract = min(L_needed, size(recShift,1));
+                if L_extract < sweepCoreLen + cfg.minPhysDelaySamples
+                    warning('[measure] Spk%d Rep%d: recShift too short for reliable deconv (%d < %d)', ...
+                        spk, rep, L_extract, sweepCoreLen + cfg.minPhysDelaySamples);
+                end
                 recForDeconv = recShift(1:L_extract, m);
-                sweepForDeconv = sweepDrive;  % 不含静音的核心 sweep
-                
+                % 不含静音的核心 sweep
+                sweepForDeconv = sweepDrive;
+
                 outStruct = deconvolve_sweep(recForDeconv, sweepForDeconv, cfg.fs, deconvParams);
                 h_full = outStruct.h;
                 pk = outStruct.peakIdx;
@@ -254,17 +239,25 @@ try
 
                 % 改进：使用 cumulative energy 定位主峰（更鲁棒）
                 if pk < cfg.minPhysDelaySamples
-                    cumE = cumsum(abs(h_full).^2);
-                    targetE = cfg.deconvCumEnergyFrac * cumE(end);
-                    newPk = find(cumE >= targetE, 1, 'first');
+                    % cumE = cumsum(abs(h_full).^2);
+                    energySeq = abs(h_full).^2;
+                    totalE = sum(energySeq);
+
+                    if totalE < 1e-18  % 判定为全零或近零
+                        newPk = [];    % 无有效峰值
+                    else
+                        cumE = cumsum(energySeq) / totalE;      % 归一化，cumE(end) == 1
+                        targetE = cfg.deconvCumEnergyFrac;      % e.g., 0.95
+                        newPk = find(cumE >= targetE, 1, 'first');
+                    end
                     if ~isempty(newPk) && newPk > pk
                         pk = newPk;
                     end
                 end
 
                 reliable = (pk >= cfg.minPhysDelaySamples) && ...
-                           (outStruct.snrEst >= cfg.snrThresholdDB) && ...
-                           (isfield(outStruct, 'peakReliability') && outStruct.peakReliability);
+                    (outStruct.snrEst >= cfg.snrThresholdDB) && ...
+                    (isfield(outStruct, 'peakReliability') && outStruct.peakReliability);
 
                 peakIdxEach_raw(m) = pk;
                 peakRelEach(m) = reliable;
@@ -287,8 +280,8 @@ try
         end
 
         driftStable = ~isempty(reliablePeaksAll) && ...
-                      (iqr(reliablePeaksAll) <= cfg.reliableMaxIQR) && ...
-                      (max(reliablePeaksAll)-min(reliablePeaksAll) <= cfg.maxAllowedDriftSamples);
+            (iqr(reliablePeaksAll) <= cfg.reliableMaxIQR) && ...
+            (max(reliablePeaksAll)-min(reliablePeaksAll) <= cfg.maxAllowedDriftSamples);
 
         % 可靠率 & median SNR
         if any(validRepMask)
@@ -321,9 +314,9 @@ try
 
         % 可用性判定（含 SNR 门限）
         usable = driftStable && ...
-                 (reliableRatioAll >= cfg.reliableMinRatio) && ...
-                 (~isempty(reliablePeaksAll)) && ...
-                 (medianSNR >= cfg.snrThresholdDB);
+            (reliableRatioAll >= cfg.reliableMinRatio) && ...
+            (~isempty(reliablePeaksAll)) && ...
+            (medianSNR >= cfg.snrThresholdDB);
 
         % 保存元数据
         meta.perSpeaker{spk} = struct(...
@@ -334,7 +327,7 @@ try
             'recommendedDelayReliable', recommendedDelayReliable, ...
             'usable', usable, ...
             'repDiscardRepeat', repDiscardRepeat ...
-        );
+            );
 
         fprintf('[diag] Spk%d usable=%d medianSNR=%.2f dB\n', spk, usable, medianSNR);
     end
@@ -364,8 +357,7 @@ try
 
 catch ME
     fprintf('[ERROR] %s\n', ME.message);
-    rethrow(ME);
-finally
+    finally
     if ~isempty(hw)
         try
             hw.release();
