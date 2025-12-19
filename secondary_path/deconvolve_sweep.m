@@ -1,9 +1,11 @@
 function out = deconvolve_sweep(recorded, sweepSig, fs, params)
-% deconvolve_sweep (改进版 v1.2)
+% deconvolve_sweep (修复版 v1.3)
 % 稳健反卷积 + 峰检测 + 可信度指标输出
 %
+% 主要修复：不再用 extraTail 截断 h_full，避免主峰丢失（适用于大延迟场景）
+%
 % 输出字段:
-%   h                : 截断后的时域IR
+%   h                : 截断后的时域IR（最终用于ANC）
 %   delayCorr        : 互相关估计延迟 (样本)
 %   startIdxGlobal   : 截取开始在原始 recorded 中的索引
 %   peakIdx          : h 内主峰索引 (1-based)
@@ -17,14 +19,15 @@ function out = deconvolve_sweep(recorded, sweepSig, fs, params)
 %   pkLocalGlobal    : 原始 h_full 中的峰位置
 %   warnEarly        : 是否出现录音早于播放的情况
 %   paramsUsed       : 参数回传
-%
+
 if nargin < 4 || isempty(params), params = struct(); end
+
 regEps        = getP(params,'regEps',1e-4);
-extraTail     = getP(params,'extraTail',4096);
+extraTail     = getP(params,'extraTail',4096);      % 仅用于 rec_aligned 长度
 preDelayKeep  = getP(params,'preDelayKeep',256);
-tailTotal     = getP(params,'tailTotal',4096);
+tailTotal     = getP(params,'tailTotal',4096);      % 最终输出 IR 长度
 peakThreshDB  = getP(params,'peakThreshDB',12);
-maxSearch     = getP(params,'maxSearch',7000);
+maxSearch     = getP(params,'maxSearch',7000);      % 必须 >= 物理延迟！
 noiseWin      = getP(params,'noiseWin',400);
 envSmoothWin  = getP(params,'envSmoothWin',8);
 cumEnergyFrac = getP(params,'cumEnergyFrac',0.05);
@@ -65,14 +68,23 @@ EXC = fft(exc, Nfft);
 magEXC2 = abs(EXC).^2;
 Hf = (REC .* conj(EXC)) ./ (magEXC2 + regEps);
 h_full = real(ifft(Hf));
-h_full = h_full(1:extraTail);
 
-% 去局部均值
-noiseBaseMean = mean(h_full(1:min(noiseWin, floor(extraTail/10))));
+% 🔧 修复点：不再用 extraTail 截断 h_full！
+% 而是保留足够长度以覆盖 maxSearch + 安全余量
+maxLengthToKeep = max(maxSearch + 2048, 16384);  % 至少 16k，确保大延迟场景不丢峰
+if length(h_full) > maxLengthToKeep
+    h_full = h_full(1:maxLengthToKeep);
+end
+
+% 去局部均值（使用前段噪声估计）
+nw_pre = min(noiseWin, floor(length(h_full)/10));
+if nw_pre < 10, nw_pre = min(100, length(h_full)); end
+noiseBaseMean = mean(h_full(1:nw_pre));
 h_full = h_full - noiseBaseMean;
 
 %% 噪声统计 + 阈值
 nw = min(noiseWin, length(h_full)-10);
+if nw < 10, nw = min(100, length(h_full)); end
 noiseSeg = h_full(1:nw);
 noiseStd = std(noiseSeg);
 noiseMAD = median(abs(noiseSeg - median(noiseSeg))) / 0.6745;
@@ -80,11 +92,18 @@ noiseBase = max(noiseStd, noiseMAD);
 th = noiseBase * 10^(peakThreshDB/20);
 
 searchEnd = min(length(h_full), maxSearch);
-cand = h_full(1:searchEnd);
+if searchEnd < 10, searchEnd = min(length(h_full), 100); end
 
+cand = h_full(1:searchEnd);
 envRaw = abs(cand);
 envSm = movmean(envRaw, envSmoothWin);
 totalE = sum(envSm);
+if totalE < 1e-18
+    % 极弱信号，直接返回默认结构
+    out = default_output(fs, params, tailTotal);
+    return;
+end
+
 cumE = cumsum(envSm);
 triggerIdx = find(cumE >= totalE * cumEnergyFrac, 1, 'first');
 if isempty(triggerIdx), triggerIdx = 1; end
@@ -92,16 +111,19 @@ if isempty(triggerIdx), triggerIdx = 1; end
 pkLocal = find(envSm(triggerIdx:searchEnd) > th, 1, 'first');
 if isempty(pkLocal)
     [~,pkLocal] = max(envSm(triggerIdx:searchEnd));
+    pkLocal = pkLocal + triggerIdx - 1;
+else
+    pkLocal = pkLocal + triggerIdx - 1;
 end
-pkLocal = pkLocal + triggerIdx - 1;
 
 % 峰能量比例
-peakWin = h_full(pkLocal:min(pkLocal+envSmoothWin*16,length(h_full)));
-peakEnergyFrac = sum(abs(peakWin)) / (sum(abs(h_full))+1e-12);
+peakWinEnd = min(pkLocal + envSmoothWin*16, length(h_full));
+peakWin = h_full(pkLocal:peakWinEnd);
+peakEnergyFrac = sum(abs(peakWin)) / (sum(abs(h_full)) + 1e-12);
 
 peakReliability = (peakEnergyFrac >= minPeakFrac);
 
-%% 截窗保留前导
+%% 截窗保留前导（生成最终输出 IR）
 winStartLocal = max(pkLocal - preDelayKeep, 1);
 winStopLocal  = min(winStartLocal + tailTotal - 1, length(h_full));
 h_out = h_full(winStartLocal:winStopLocal);
@@ -109,7 +131,7 @@ h_out = h_full(winStartLocal:winStopLocal);
 peakIdxFinal = pkLocal - winStartLocal + 1;
 if peakIdxFinal < 1, peakIdxFinal = 1; end
 
-% SNR 自适应
+% SNR 自适应估计
 bodyL = max(1, peakIdxFinal - snrBodyRadius);
 bodyR = min(length(h_out), peakIdxFinal + snrBodyRadius);
 bodySlice = h_out(bodyL:bodyR);
@@ -141,9 +163,30 @@ out.paramsUsed = params;
 end
 
 function val = getP(p, name, defaultVal)
-if isstruct(p) && isfield(p,name) && ~isempty(p.(name))
-    val = p.(name);
-else
-    val = defaultVal;
+    if isstruct(p) && isfield(p,name) && ~isempty(p.(name))
+        val = p.(name);
+    else
+        val = defaultVal;
+    end
 end
+
+function out = default_output(fs, params, tailTotal)
+    % 安全兜底：当信号极弱或异常时返回合理默认值
+    out.h = zeros(tailTotal, 1);
+    out.delayCorr = 0;
+    out.startIdxGlobal = 1;
+    out.peakIdx = 1;
+    out.peakIdxZeroBased = 0;
+    out.peakReliability = false;
+    out.peakEnergyFrac = 0;
+    out.preEnergyFrac = 0;
+    out.snrEst = -Inf;
+    out.noiseStd = 0;
+    out.noiseMAD = 0;
+    out.thresholdUsed = 0;
+    out.triggerIdx = 1;
+    out.pkLocalGlobal = 1;
+    out.warnEarly = false;
+    out.sampleRate = fs;
+    out.paramsUsed = params;
 end

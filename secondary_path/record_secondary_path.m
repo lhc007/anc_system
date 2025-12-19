@@ -24,7 +24,7 @@ deconvParams = struct( ...
     'maxSearch',     cfg.deconvMaxSearch , ...
     'regEps',        cfg.deconvRegEps, ...
     'noiseWin',      cfg.deconvNoiseWin, ...
-    'envSmoothWin',  cfg.envSmoothWin , ...
+    'envSmoothWin',  cfg.deconvEnvSmoothWin , ...
     'cumEnergyFrac', cfg.deconvCumEnergyFrac, ...
     'minPeakFrac',   cfg.deconvMinPeakFrac, ...
     'snrBodyRadius', cfg.deconvSnrBodyRadius, ...
@@ -32,10 +32,8 @@ deconvParams = struct( ...
     );
 
 %% ============== 初始化硬件（带安全释放）=============
-hw = [];
 try
-    fprintf('[measure] 初始化硬件...\n');
-    hw = hardware_init_measure(cfg);
+
 
     %% ============== 生成 Sweep ==============
     fprintf('[measure] 生成 ESS sweep...\n');
@@ -83,8 +81,8 @@ try
         'lowFreqBoost',cfg.enableLowFreqBoost,'exportAlignedIR',cfg.exportAlignedIR);
     meta.perSpeaker = cell(cfg.numSpeakers,1);
     allIrRepList = cell(cfg.numSpeakers,1);
-
     %% ============== 测量循环 ==============
+    hw = [];
     for spk = 1:cfg.numSpeakers
         fprintf('\n[measure] ===== 扬声器 %d =====\n', spk);
 
@@ -100,6 +98,16 @@ try
         % === 阶段1：采集所有 repeats ===
         for rep = 1:cfg.repetitions
             fprintf('[measure]  播放重复 %d/%d...\n', rep, cfg.repetitions);
+            
+            if rep == 1
+            fprintf('[measure] 初始化硬件...\n');
+            hw = hardware_init_measure(cfg);
+            else
+                % 释放上一次的硬件
+                hw.release();
+                pause(0.3);  % 给 Windows 音频子系统时间清理资源
+                hw = hardware_init_measure(cfg);  % 重新打开
+            end
 
             % === 连续指针模式播放 ===
             spkDriveSig = cfg.spkAmplitude(spk) * sweepSig(:);  % 列向量
@@ -182,7 +190,8 @@ try
 
             fprintf('[measure]  Spk%d Rep%d globalShift=%d\n', spk, rep, globalShift);
         end
-        
+        % 所有 repeats 结束后释放
+        hw.release();
         % === 阶段1.5：确定 refDelay（✅ 修复：使用 globalShift 中位数作为真实系统延迟）===
         validShifts = repGlobalShifts(~isnan(repGlobalShifts) & isfinite(repGlobalShifts));
         if ~isempty(validShifts)
@@ -357,12 +366,11 @@ try
 
 catch ME
     fprintf('[ERROR] %s\n', ME.message);
-finally
     if ~isempty(hw)
         try
             hw.release();
         catch
-            % 忽略释放错误
+            fprintf('[ERROR] 释放资源错误 %s\n', ME.message);
         end
     end
 end
