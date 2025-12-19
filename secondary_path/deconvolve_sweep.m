@@ -1,8 +1,6 @@
 function out = deconvolve_sweep(recorded, sweepSig, fs, params)
-% deconvolve_sweep (修复版 v1.3)
-% 稳健反卷积 + 峰检测 + 可信度指标输出
-%
-% 主要修复：不再用 extraTail 截断 h_full，避免主峰丢失（适用于大延迟场景）
+% deconvolve_sweep (修复版 v1.4)
+% 修复点：使用能量比例代替绝对值比例，添加侧瓣抑制检查，修复peakReliability判定
 %
 % 输出字段:
 %   h                : 截断后的时域IR（最终用于ANC）
@@ -11,7 +9,9 @@ function out = deconvolve_sweep(recorded, sweepSig, fs, params)
 %   peakIdx          : h 内主峰索引 (1-based)
 %   peakIdxZeroBased : 0-based 索引
 %   peakReliability  : 布尔，峰可信
-%   peakEnergyFrac   : 峰附近能量占总体能量比例
+%   peakAbsFrac      : 峰值区域绝对值比例
+%   peakEnergyFrac   : 峰值区域能量比例
+%   sideLobeSuppression : 侧瓣抑制比 (dB)
 %   preEnergyFrac    : 峰前能量占总能量比例
 %   snrEst           : 主瓣窗口 vs 尾部 SNR (dB)
 %   noiseStd, noiseMAD, thresholdUsed
@@ -34,6 +34,7 @@ cumEnergyFrac = getP(params,'cumEnergyFrac',0.05);
 minPeakFrac   = getP(params,'minPeakFrac',0.02);
 snrBodyRadius = getP(params,'snrBodyRadius',96);
 fftCorrEnable = getP(params,'fftCorrEnable',true);
+debugMode     = getP(params,'debugMode',false);     % 新增调试模式
 
 rec = recorded(:);
 exc = sweepSig(:);
@@ -70,7 +71,6 @@ Hf = (REC .* conj(EXC)) ./ (magEXC2 + regEps);
 h_full = real(ifft(Hf));
 
 % 🔧 修复点：不再用 extraTail 截断 h_full！
-% 而是保留足够长度以覆盖 maxSearch + 安全余量
 maxLengthToKeep = max(maxSearch + 2048, 16384);  % 至少 16k，确保大延迟场景不丢峰
 if length(h_full) > maxLengthToKeep
     h_full = h_full(1:maxLengthToKeep);
@@ -116,12 +116,55 @@ else
     pkLocal = pkLocal + triggerIdx - 1;
 end
 
-% 峰能量比例
+%% ✅ 修复：改进的peakReliability判定
 peakWinEnd = min(pkLocal + envSmoothWin*16, length(h_full));
 peakWin = h_full(pkLocal:peakWinEnd);
-peakEnergyFrac = sum(abs(peakWin)) / (sum(abs(h_full)) + 1e-12);
 
-peakReliability = (peakEnergyFrac >= minPeakFrac);
+% 1. 计算两种比例
+peakAbsFrac = sum(abs(peakWin)) / (sum(abs(h_full)) + 1e-12);
+peakEnergyFrac = sum(peakWin.^2) / (sum(h_full.^2) + 1e-12);
+
+% 2. 侧瓣抑制比检查
+side_lobe_radius = min(100, floor(length(h_full)/4));
+side_start = max(1, pkLocal - side_lobe_radius);
+side_end = min(length(h_full), pkLocal + side_lobe_radius);
+exclude_radius = min(20, side_lobe_radius/2);
+exclude_start = max(1, pkLocal - exclude_radius);
+exclude_end = min(length(h_full), pkLocal + exclude_radius);
+
+% 构建侧瓣区域（排除主峰区域）
+side_region = [];
+for i = side_start:side_end
+    if i < exclude_start || i > exclude_end
+        side_region = [side_region, i];
+    end
+end
+
+if ~isempty(side_region)
+    main_peak_val = max(abs(h_full(exclude_start:exclude_end)));
+    max_side_lobe = max(abs(h_full(side_region)));
+    if max_side_lobe > 0
+        side_lobe_suppression_db = 20*log10(main_peak_val/(max_side_lobe + 1e-12));
+    else
+        side_lobe_suppression_db = Inf;
+    end
+else
+    side_lobe_suppression_db = Inf;
+end
+
+% 3. 综合判定条件
+abs_ok = (peakAbsFrac >= minPeakFrac);
+energy_ok = (peakEnergyFrac >= minPeakFrac * 0.5);  % 能量阈值减半
+side_lobe_ok = (side_lobe_suppression_db > 3);  % 至少3dB抑制
+
+% 最终可靠性：满足(绝对值或能量条件) AND 有基本侧瓣抑制
+peakReliability = (abs_ok || energy_ok) && side_lobe_ok;
+
+% 调试信息
+if debugMode
+    fprintf('  [DEB-deconv] pk=%d, absFrac=%.4f, energyFrac=%.4f, sideSupp=%.1f dB -> reliable=%d\n', ...
+        pkLocal, peakAbsFrac, peakEnergyFrac, side_lobe_suppression_db, peakReliability);
+end
 
 %% 截窗保留前导（生成最终输出 IR）
 winStartLocal = max(pkLocal - preDelayKeep, 1);
@@ -149,7 +192,9 @@ out.startIdxGlobal = startIdx;
 out.peakIdx = peakIdxFinal;
 out.peakIdxZeroBased = peakIdxFinal - 1;
 out.peakReliability = peakReliability;
+out.peakAbsFrac = peakAbsFrac;
 out.peakEnergyFrac = peakEnergyFrac;
+out.sideLobeSuppression = side_lobe_suppression_db;
 out.preEnergyFrac = preEnergyFrac;
 out.snrEst = snrEst;
 out.noiseStd = noiseStd;
@@ -178,7 +223,9 @@ function out = default_output(fs, params, tailTotal)
     out.peakIdx = 1;
     out.peakIdxZeroBased = 0;
     out.peakReliability = false;
+    out.peakAbsFrac = 0;
     out.peakEnergyFrac = 0;
+    out.sideLobeSuppression = 0;
     out.preEnergyFrac = 0;
     out.snrEst = -Inf;
     out.noiseStd = 0;

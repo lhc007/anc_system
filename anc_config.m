@@ -88,26 +88,28 @@ cfg.outputAudioFile   = 'anc_output.wav';                          % ANC 处理�
 cfg.noiseFile         = 'road_noise.wav';                          % 原始单通道路噪样本（用于生成仿真数据）
 
 %% 次级路径录制（测量专用参数）
+
 cfg.saveEachRepeatIR = true;      % 保存每个repeat的IR用于后期分析
 cfg.saveDiagnosticInfo = true;     % 保存完整的元数据
 cfg.enableAutoGainAdjustment =true; %SNR过低时给出增益调整建议
+
 % sweepCfg参数（扫频信号生成）
 cfg.padLeading        = 0.5;    % 扫频前导静音时间（秒）
-cfg.padTrailing       = 1;    % 扫频尾随静音时间（秒）
-cfg.amplitude         = 0.98;    % 扫频信号幅值（接近满幅但避免削波）
+cfg.padTrailing       = 1;      % 扫频尾随静音时间（秒）
+cfg.amplitude         = 0.98;   % 扫频信号幅值（接近满幅但避免削波）
 cfg.sweepDuration     = 5;      % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
 cfg.minSnrForReliable = 3; 
 cfg.spkAmplitude      = [1.0, 1.0];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
 cfg.sweepF1           = 80;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
 cfg.sweepF2           = 1200;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 cfg.repetitions       = 1;                     % 重复播放并录制次数；用于提高 SNR 和鲁棒性
-cfg.timeFrameSamples  = 1024;                   % 录音/播放缓冲区帧大小（必须是 2 的幂）
-cfg.irMaxLen          = 16384;                  % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
+cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
+cfg.irMaxLen          = 16384;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
 cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
 cfg.saveFirstRaw      = false;                 % 是否保存第一次原始录音（用于调试）
 cfg.saveAllRaw        = true;                  % 是否保存所有重复的原始录音（占用磁盘空间）
-cfg.doAlignRepeats    = true;                 % 是否对多次重复测量进行时间对齐（false 保留真实延迟变化）
+cfg.doAlignRepeats    = true;                  % 是否对多次重复测量进行时间对齐（false 保留真实延迟变化）
 cfg.exportAlignedIR   = true;                  % 是否导出对齐后的平均 IR（用于诊断）
 cfg.preSilenceSec     = 0.8;                   % 扫频前静音时间（秒），确保系统稳定
 cfg.postSilenceSec    = 0.4;                   % 扫频后静音时间（秒），捕获完整 IR 尾部
@@ -118,7 +120,7 @@ cfg.enableLowFreqBoost    = false;             % 是否在扫频中增强低频�
 cfg.lowFreqCutHz          = 80;                % 低频增强的截止频率（低于此频率按比例提升）
 cfg.lowFreqMixRatio       = 0.9;               % 低频增强混合比例（0.9 表示 90% 能量集中在低频段）
 cfg.minPhysDelaySamples   = 50;                % 物理最小延迟（样本）；用于剔除非物理解（如负延迟）
-cfg.maxPhysDelaySamples   = 300;                 % 物理上可能的最大次级路径延迟（例如声音传播最远距离对应的样本数）。
+cfg.maxPhysDelaySamples   = 300;               % 物理上可能的最大次级路径延迟（例如声音传播最远距离对应的样本数）。
 cfg.maxAllowedDriftSamples = 200;              % 允许的最大重复间延迟漂移（样本）；超限则标记不可靠
 cfg.enableRepeatAlignment = true;              % 是否启用重复测量间的自动对齐（基于互相关）
 
@@ -143,9 +145,10 @@ cfg.deconvRegEps          = 1e-4;                % Tikhonov 正则化参数；�
 cfg.deconvNoiseWin        = 1200;                % 用于估计噪声功率的窗口长度（样本）
 cfg.deconvEnvSmoothWin    = 10;                  % 包络平滑窗口长度（样本）
 cfg.deconvCumEnergyFrac   = 0.05;                % 累积能量达到该比例时视为有效起点
-cfg.deconvMinPeakFrac     = 0.02;               % 最小峰值能量占比（防虚假峰）
+cfg.deconvMinPeakFrac     = 0.005;               % ✅ 修复：从0.02降低到0.005，解决高SNR低比例问题
 cfg.deconvSnrBodyRadius   = 96;                  % SNR 计算时主峰邻域半径（样本）
 cfg.deconvFftCorrEnable   = true;                % 是否启用 FFT 域互相关辅助峰值定位
+cfg.deconvDebugMode       = true;                % ✅ 新增：启用deconvolve_sweep的调试模式
 
 %% ========== 反馈路径测量参数 (Feedback Path) ==========
 % 扫频信号设置
