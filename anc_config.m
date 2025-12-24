@@ -63,15 +63,6 @@ cfg.micDeviceName    = '六通道麦克风阵列 (YDM6MIC Audio)';  % 多通道�
 cfg.spkDevice1Name   = '扬声器 (USB Audio Device)';         % 第一个扬声器输出设备（USB 声卡）
 cfg.spkDevice2Name   = '扬声器2 (Realtek(R) Audio)';        % 第二个扬声器输出设备（主板 Realtek 声卡）
 
-%% 扬声器映射（关键！）
-% 每个扬声器指定其输出设备和通道 格式: {设备名称, 输出通道索引 (1=左, 2=右)}
-% cfg.spkMapping = {
-%     {'扬声器 (USB Audio Device)', 1};   % 扬声器 1 → USB 声卡左声道（通常对应物理左上位置）
-%     {'扬声器 (USB Audio Device)', 2};   % 扬声器 2 → USB 声卡右声道（通常对应物理左下位置）
-%     {'扬声器2 (Realtek(R) Audio)', 1};  % 扬声器 3 → Realtek 左声道（通常对应物理右上位置）
-%     {'扬声器2 (Realtek(R) Audio)', 2}   % 扬声器 4 → Realtek 右声道（通常对应物理右下位置）
-% };
-
 %% 麦克风与通道映射
 cfg.micNumChannels         = 6;                % 麦克风阵列总通道数
 cfg.micChannels.reference  = [1 2 3 4];        % 参考麦克风通道索引（用于获取初级噪声参考信号）
@@ -94,14 +85,14 @@ cfg.saveDiagnosticInfo = true;     % 保存完整的元数据
 cfg.enableAutoGainAdjustment =true; %SNR过低时给出增益调整建议
 
 % sweepCfg参数（扫频信号生成）
-cfg.padLeading        = 0.5;    % 扫频前导静音时间（秒）
-cfg.padTrailing       = 1;      % 扫频尾随静音时间（秒）
-cfg.amplitude         = 0.98;   % 扫频信号幅值（接近满幅但避免削波）
+cfg.padLeading        = 0.3;    % 扫频前导静音时间（秒）
+cfg.padTrailing       = 0.3;      % 扫频尾随静音时间（秒）
+cfg.amplitude         = 0.8;   % 扫频信号幅值（接近满幅但避免削波）
 cfg.sweepDuration     = 5;      % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
 cfg.minSnrForReliable = 3; 
 cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
-cfg.sweepF1           = 80;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
-cfg.sweepF2           = 1200;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
+cfg.sweepF1           = 100;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
+cfg.sweepF2           = 4000;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 cfg.repetitions       = 1;                     % 重复播放并录制次数；用于提高 SNR 和鲁棒性
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
 cfg.irMaxLen          = 4096;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
