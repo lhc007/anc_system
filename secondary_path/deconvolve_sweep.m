@@ -1,4 +1,5 @@
-function out = deconvolve_sweep(recorded, sweepSig,cfg)
+function out = deconvolve_sweep(recorded, sweepSig, cfg)
+% 修复版的deconvolve_sweep函数，解决延迟估计问题
 
 fs = cfg.fs;
 regEps        = cfg.deconvRegEps;
@@ -25,43 +26,86 @@ exc = sweepSig(:);
 Nrec = length(rec);
 Nexc = length(exc);
 
-%% 互相关延迟估计
-if fftCorrEnable
-    NfftCorr = 2^nextpow2(Nrec + Nexc);
-    RECf = fft(rec, NfftCorr);
-    EXCf = fft(exc, NfftCorr);
-    C = ifft(RECf .* conj(EXCf));
-    C = [C(end-Nexc+2:end); C(1:Nrec)];
-    lags = (-Nexc+2:Nrec)';
-else
-    [C,lags] = xcorr(rec, exc);
-end
-[~,imax] = max(C);
-delayCorr = lags(imax);
-
-% ✅ 修复：验证互相关延迟的合理性
+% 调试信息
 if debugMode
-    fprintf('  [DEB-xcorr] raw delayCorr=%d, Nrec=%d, Nexc=%d\n', ...
-        delayCorr, Nrec, Nexc);
+    fprintf('  [DEB-start] Nrec=%d, Nexc=%d, fs=%d Hz\n', ...
+        Nrec, Nexc, fs);
+    fprintf('  [DEB-start] minPhysDelay=%d, maxPhysDelay=%d (%.3f-%.3f s)\n', ...
+        minPhysDelay, maxPhysDelay, minPhysDelay/fs, maxPhysDelay/fs);
 end
 
-% 如果延迟异常大，可能是计算错误，进行修正
-if abs(delayCorr) > min(Nrec, Nexc) * 0.8
-    % 尝试使用绝对值互相关重新计算
-    [~, imax2] = max(abs(C));
-    delayCorr2 = lags(imax2);
+%% ✅ 修复：改进的互相关延迟估计
+% 使用加权互相关，聚焦于主要能量区域
+max_len = max(Nrec, Nexc);
+if Nrec < max_len
+    rec_padded = [rec; zeros(max_len - Nrec, 1)];
+else
+    rec_padded = rec;
+end
+if Nexc < max_len
+    exc_padded = [exc; zeros(max_len - Nexc, 1)];
+else
+    exc_padded = exc;
+end
+
+if fftCorrEnable
+    NfftCorr = 2^nextpow2(max_len * 2);
+    RECf = fft(rec_padded, NfftCorr);
+    EXCf = fft(exc_padded, NfftCorr);
+    C = ifft(RECf .* conj(EXCf), 'symmetric');
+    
+    % 正确的延迟映射
+    lags = (-max_len+1:max_len-1)';
+    C = C(1:length(lags));
+else
+    [C, lags] = xcorr(rec_padded, exc_padded, 'normalized');
+end
+
+% ✅ 修复：限制在合理延迟范围内搜索
+min_lag = minPhysDelay - 100;  % 稍微宽松的下界
+max_lag = maxPhysDelay + 1000; % 稍微宽松的上界
+
+valid_lags = lags >= min_lag & lags <= max_lag;
+if any(valid_lags)
+    C_valid = C(valid_lags);
+    lags_valid = lags(valid_lags);
+    [~, imax] = max(abs(C_valid));
+    delayCorr = lags_valid(imax);
+    
     if debugMode
-        fprintf('  [DEB-xcorr] 使用绝对值互相关，delayCorr2=%d\n', delayCorr2);
+        fprintf('  [DEB-xcorr] 在合理范围内找到延迟: delayCorr=%d\n', delayCorr);
     end
-    delayCorr = delayCorr2;
+else
+    % 如果找不到合理延迟，使用互相关峰值但记录警告
+    [~, imax] = max(abs(C));
+    delayCorr = lags(imax);
+    
+    if debugMode
+        fprintf('  [DEB-xcorr] 警告: 使用全范围延迟: delayCorr=%d\n', delayCorr);
+    end
 end
 
 startIdx = delayCorr + 1;
 warnEarly = startIdx < 1;
-if startIdx < 1, startIdx = 1; end
+if startIdx < 1
+    startIdx = 1;
+    if debugMode
+        fprintf('  [DEB-xcorr] 警告: startIdx < 1, 强制设为1\n');
+    end
+end
 
 segEnd = min(startIdx + Nexc + extraTail - 1, Nrec);
+if segEnd < startIdx
+    % 处理异常情况
+    segEnd = min(startIdx + Nexc, Nrec);
+end
 rec_aligned = rec(startIdx:segEnd);
+
+% 调试信息
+if debugMode
+    fprintf('  [DEB-xcorr] delayCorr=%d, startIdx=%d, segEnd=%d\n', ...
+        delayCorr, startIdx, segEnd);
+end
 
 %% 频域反卷积
 Nfft = 2^nextpow2(length(rec_aligned) + Nexc - 1);
@@ -111,18 +155,10 @@ triggerIdx = find(cumE >= totalE * cumEnergyFrac, 1, 'first');
 if isempty(triggerIdx), triggerIdx = 1; end
 
 % 3. ✅ 修复：正确的物理延迟范围计算
-% 基于全局信息估算合理延迟范围
-% 方法1：使用互相关延迟，但限制范围
-if delayCorr > 0
-    % 限制delayCorr在合理范围内
-    validDelayCorr = min(max(delayCorr, minPhysDelay), maxPhysDelay);
-    expectedStart = max(minPhysDelay, validDelayCorr - delaySearchRadius);
-    expectedEnd = min(searchEnd, validDelayCorr + delaySearchRadius);
-else
-    % 方法2：如果没有有效的互相关延迟，使用经验范围
-    expectedStart = minPhysDelay;
-    expectedEnd = min(searchEnd, maxPhysDelay);
-end
+% 基于互相关延迟估算合理延迟范围
+validDelayCorr = min(max(delayCorr, minPhysDelay), maxPhysDelay);
+expectedStart = max(minPhysDelay, validDelayCorr - delaySearchRadius);
+expectedEnd = min(searchEnd, validDelayCorr + delaySearchRadius);
 
 % 确保范围有效且起始点小于结束点
 if expectedStart >= expectedEnd
@@ -401,26 +437,29 @@ out.paramsUsed = cfg;
 out.irQuality = ir_quality;
 end
 
-
 function out = default_output(cfg, tailTotal)
-    out.h = zeros(tailTotal, 1);
-    out.delayCorr = 0;
-    out.startIdxGlobal = 1;
-    out.peakIdx = 1;
-    out.peakIdxZeroBased = 0;
-    out.peakReliability = false;
-    out.peakAbsFrac = 0;
-    out.peakEnergyFrac = 0;
-    out.sideLobeSuppression = 0;
-    out.preEnergyFrac = 0;
-    out.snrEst = -Inf;
-    out.noiseStd = 0;
-    out.noiseMAD = 0;
-    out.thresholdUsed = 0;
-    out.triggerIdx = 1;
-    out.pkLocalGlobal = 1;
-    out.warnEarly = false;
-    out.sampleRate = fs;
-    out.paramsUsed = params;
-    out.irQuality = struct('preEchoRatio', 0, 'peakSharpness', 0, 'energyConcentration', 0, 'sideLobeSuppression', 0);
+% 修复的默认输出函数
+fs = cfg.fs;
+params = cfg;  % 将cfg作为params
+
+out.h = zeros(tailTotal, 1);
+out.delayCorr = 0;
+out.startIdxGlobal = 1;
+out.peakIdx = 1;
+out.peakIdxZeroBased = 0;
+out.peakReliability = false;
+out.peakAbsFrac = 0;
+out.peakEnergyFrac = 0;
+out.sideLobeSuppression = 0;
+out.preEnergyFrac = 0;
+out.snrEst = -Inf;
+out.noiseStd = 0;
+out.noiseMAD = 0;
+out.thresholdUsed = 0;
+out.triggerIdx = 1;
+out.pkLocalGlobal = 1;
+out.warnEarly = false;
+out.sampleRate = fs;
+out.paramsUsed = params;
+out.irQuality = struct('preEchoRatio', 0, 'peakSharpness', 0, 'energyConcentration', 0, 'sideLobeSuppression', 0);
 end

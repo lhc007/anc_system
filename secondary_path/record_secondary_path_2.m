@@ -1,6 +1,6 @@
 % record_secondary_path.m 多扬声器→多误差麦克风次级路径测量（ESS）
 % 优化点：多麦对齐、IR峰值对齐、内存控制、动态SNR、错误安全释放
-% 版本：v2.6 优化版
+% 版本：v2.7 修复延迟估计问题版
 
 clear; clc;
 
@@ -145,8 +145,19 @@ try
                 rdPtr = rdPtr + blockSize;
             end
 
-            % 截取与原始 sweep 等长（确保后续 xcorr 对齐）
-            recordedFull = recordedFull(1:totalSamples, :);
+            % ✅ 修复：确保录音长度与期望一致
+            if size(recordedFull, 1) ~= totalSamples
+                fprintf('[WARN] Spk%d Rep%d: 录音长度不匹配 (期望=%d, 实际=%d)\n', ...
+                    spk, rep, totalSamples, size(recordedFull, 1));
+                
+                % 截断或补零以匹配期望长度
+                if size(recordedFull, 1) > totalSamples
+                    recordedFull = recordedFull(1:totalSamples, :);
+                else
+                    recordedFull(end+1:totalSamples, :) = 0;
+                end
+            end
+            
             recorded = recordedFull(:, errMicIdx);
 
             if saveRaw && ((spk==1 && rep==1 && cfg.saveFirstRaw) || cfg.saveAllRaw)
@@ -470,7 +481,7 @@ try
     secondary.numMics = numErrMics;  % ⚠️ 关键：只记录误差麦数量
     secondary.errorMicPhysicalChannels = errMicIdx;  % 明确物理通道
     secondary.irLength = Lh;
-    secondary.description = 'Secondary path v2.6 (optimized with quality metrics)';
+    secondary.description = 'Secondary path v2.7 (fixed delay estimation)';
     secondary.timestampUtc = datestr(datetime('now','TimeZone','UTC'),'yyyy-mm-dd HH:MM:SS');
 
     % 推荐延迟向量
@@ -508,3 +519,4 @@ catch ME
 end
 
 fprintf('[measure] Done.\n');
+

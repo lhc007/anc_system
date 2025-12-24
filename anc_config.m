@@ -134,13 +134,13 @@ cfg.deconvRegEps          = 1e-4;                % Tikhonov 正则化参数；�
 cfg.deconvNoiseWin        = 800;                % 用于估计噪声功率的窗口长度（样本）
 cfg.deconvEnvSmoothWin    = 10;                  % 包络平滑窗口长度（样本）
 cfg.deconvSnrBodyRadius   = 96;                  % SNR 计算时主峰邻域半径（样本）
-cfg.deconvFftCorrEnable   = true;                % 是否启用 FFT 域互相关辅助峰值定位
+cfg.deconvFftCorrEnable   = false;                % 是否启用 FFT 域互相关辅助峰值定位
 cfg.deconvDebugMode       = true;                % ✅ 新增：启用deconvolve_sweep的调试模式
 
 % 在 anc_config.m 中添加
-cfg.minPhysDelaySamples = round(0.002 * cfg.fs); % 2ms = 96样本 最小物理延迟（样本）
-cfg.maxPhysDelaySamples = round(00.1 * cfg.fs);    % 100ms = 4800样本 最大物理延迟（样本）
-cfg.delaySearchRadius = 2000;   % 延迟搜索半径（样本）
+cfg.minPhysDelaySamples = 50; % 2ms = 96样本 最小物理延迟（样本）
+cfg.maxPhysDelaySamples = 2000;    % 100ms = 4800样本 最大物理延迟（样本）
+cfg.delaySearchRadius = 500;   % 延迟搜索半径（样本）
 cfg.peakRefineRadius = 150;     % 峰值细化半径（样本）
 cfg.peakRefineEnable = true;   % 峰值优化
 % 预回声容忍度分级
