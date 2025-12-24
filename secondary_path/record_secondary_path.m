@@ -11,33 +11,13 @@ errMicIdx = cfg.micChannels.error;               % e.g., [5 6]
 numErrMics = length(errMicIdx);
 fprintf('[measure] 误差麦克风通道: %s\n', mat2str(errMicIdx));
 
-% Sweep 配置
-sweepCfg = struct('fs',cfg.fs,'T',cfg.sweepDuration,'f1',cfg.sweepF1,'f2',cfg.sweepF2,...
-    'padLeading',cfg.padLeading,'padTrailing',cfg.padTrailing,'amplitude',cfg.amplitude);
-
-% deconvolve 参数
-deconvParams = struct( ...
-    'extraTail',     cfg.deconvExtraTail, ...
-    'preDelayKeep',  cfg.deconvPreDelayKeep, ...
-    'peakThreshDB',  cfg.deconvPeakThreshDB, ...
-    'tailTotal',     cfg.irMaxLen, ...
-    'maxSearch',     cfg.deconvMaxSearch , ...
-    'regEps',        cfg.deconvRegEps, ...
-    'noiseWin',      cfg.deconvNoiseWin, ...
-    'envSmoothWin',  cfg.deconvEnvSmoothWin , ...
-    'cumEnergyFrac', cfg.deconvCumEnergyFrac, ...
-    'minPeakFrac',   cfg.deconvMinPeakFrac, ...
-    'snrBodyRadius', cfg.deconvSnrBodyRadius, ...
-    'fftCorrEnable', cfg.deconvFftCorrEnable ...
-    );
-
 %% ============== 初始化硬件（带安全释放）=============
 try
 
 
     %% ============== 生成 Sweep ==============
     fprintf('[measure] 生成 ESS sweep...\n');
-    [sweepSigCore, invFilter, sweepInfo] = generate_sweep(sweepCfg);
+    [sweepSigCore, invFilter, sweepInfo] = generate_sweep(cfg);
     preSilence  = zeros(round(cfg.preSilenceSec*cfg.fs),1);
     postSilence = zeros(round(cfg.postSilenceSec*cfg.fs),1);
 
@@ -45,10 +25,10 @@ try
         [b_lp,a_lp] = butter(4, cfg.lowFreqCutHz/(cfg.fs/2), 'low');
         sweepLow    = filter(b_lp,a_lp,sweepSigCore);
         sweepMixed  = (1 - cfg.lowFreqMixRatio)*sweepSigCore + cfg.lowFreqMixRatio*sweepLow;
-        sweepMixed  = sweepMixed / max(abs(sweepMixed)+1e-12) * sweepCfg.amplitude;
+        sweepMixed  = sweepMixed / max(abs(sweepMixed)+1e-12) * cfg.amplitude;
         sweepDrive  = sweepMixed;
     else
-        sweepDrive  = sweepSigCore / max(abs(sweepSigCore)+1e-12) * sweepCfg.amplitude;
+        sweepDrive  = sweepSigCore / max(abs(sweepSigCore)+1e-12) * cfg.amplitude;
     end
 
     sweepSig = [preSilence; sweepDrive; postSilence];
@@ -241,7 +221,7 @@ try
                 % 不含静音的核心 sweep
                 sweepForDeconv = sweepDrive;
 
-                outStruct = deconvolve_sweep(recForDeconv, sweepForDeconv, cfg.fs, deconvParams);
+                outStruct = deconvolve_sweep(recForDeconv, sweepForDeconv, cfg);
                 h_full = outStruct.h;
                 pk = outStruct.peakIdx;
                 snrMic(m) = outStruct.snrEst;

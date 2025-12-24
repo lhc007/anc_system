@@ -1,27 +1,24 @@
-function out = deconvolve_sweep(recorded, sweepSig, fs, params)
-% deconvolve_sweep (修复版 v1.7)
-% 修复点：修复搜索范围计算错误，添加互相关延迟验证
+function out = deconvolve_sweep(recorded, sweepSig,cfg)
 
-if nargin < 4 || isempty(params), params = struct(); end
-
-regEps        = getP(params,'regEps',1e-4);
-extraTail     = getP(params,'extraTail',4096);
-preDelayKeep  = getP(params,'preDelayKeep',256);
-tailTotal     = getP(params,'tailTotal',4096);
-peakThreshDB  = getP(params,'peakThreshDB',12);
-maxSearch     = getP(params,'maxSearch',15000);
-noiseWin      = getP(params,'noiseWin',400);
-envSmoothWin  = getP(params,'envSmoothWin',8);
-cumEnergyFrac = getP(params,'cumEnergyFrac',0.05);
-minPeakFrac   = getP(params,'minPeakFrac',0.005);
-snrBodyRadius = getP(params,'snrBodyRadius',96);
-fftCorrEnable = getP(params,'fftCorrEnable',true);
-debugMode     = getP(params,'debugMode',false);
+fs = cfg.fs;
+regEps        = cfg.deconvRegEps;
+extraTail     = cfg.deconvExtraTail;
+preDelayKeep  = cfg.deconvPreDelayKeep;
+tailTotal     = cfg.irMaxLen;
+peakThreshDB  = cfg.deconvPeakThreshDB;
+maxSearch     = cfg.deconvMaxSearch;
+noiseWin      = cfg.deconvNoiseWin;
+envSmoothWin  = cfg.deconvEnvSmoothWin;
+cumEnergyFrac = cfg.deconvCumEnergyFrac;
+minPeakFrac   = cfg.deconvMinPeakFrac;
+snrBodyRadius = cfg.deconvSnrBodyRadius;
+fftCorrEnable = cfg.deconvFftCorrEnable;
+debugMode     = cfg.deconvDebugMode;
 
 % 物理延迟范围参数
-minPhysDelay  = getP(params, 'minPhysDelay', 50);
-maxPhysDelay  = getP(params, 'maxPhysDelay', 5000);
-delaySearchRadius = getP(params, 'delaySearchRadius', 1000);
+minPhysDelay  = cfg.minPhysDelaySamples;
+maxPhysDelay  = cfg.maxPhysDelaySamples;
+delaySearchRadius = cfg.delaySearchRadius;
 
 rec = recorded(:);
 exc = sweepSig(:);
@@ -104,7 +101,7 @@ envRaw = abs(cand);
 envSm = movmean(envRaw, envSmoothWin);
 totalE = sum(envSm);
 if totalE < 1e-18
-    out = default_output(fs, params, tailTotal);
+    out = default_output(cfg, tailTotal);
     return;
 end
 
@@ -177,8 +174,8 @@ if envSm(pkLocal) < th * 0.5
 end
 
 %% 峰值细化
-if getP(params, 'peakRefineEnable', true)
-    peakRefineRadius = getP(params, 'peakRefineRadius', 100);
+if cfg.peakRefineEnable
+    peakRefineRadius = cfg.peakRefineRadius;
     if pkLocal > 1 && pkLocal < length(h_full)
         refineStart = max(1, pkLocal - peakRefineRadius);
         refineEnd = min(length(h_full), pkLocal + peakRefineRadius);
@@ -400,19 +397,12 @@ out.triggerIdx = triggerIdx;
 out.pkLocalGlobal = pkLocal;
 out.warnEarly = warnEarly;
 out.sampleRate = fs;
-out.paramsUsed = params;
+out.paramsUsed = cfg;
 out.irQuality = ir_quality;
 end
 
-function val = getP(p, name, defaultVal)
-    if isstruct(p) && isfield(p,name) && ~isempty(p.(name))
-        val = p.(name);
-    else
-        val = defaultVal;
-    end
-end
 
-function out = default_output(fs, params, tailTotal)
+function out = default_output(cfg, tailTotal)
     out.h = zeros(tailTotal, 1);
     out.delayCorr = 0;
     out.startIdxGlobal = 1;

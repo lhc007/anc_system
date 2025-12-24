@@ -142,7 +142,7 @@ cfg.minPhysDelaySamples = round(0.002 * cfg.fs); % 2ms = 96样本 最小物理�
 cfg.maxPhysDelaySamples = round(00.1 * cfg.fs);    % 100ms = 4800样本 最大物理延迟（样本）
 cfg.delaySearchRadius = 2000;   % 延迟搜索半径（样本）
 cfg.peakRefineRadius = 150;     % 峰值细化半径（样本）
-
+cfg.peakRefineEnable = true;   % 峰值优化
 % 预回声容忍度分级
 cfg.preEchoSevereThresh = 0.15; % 严重预回声阈值
 cfg.preEchoModerateThresh = 0.05; % 中等预回声阈值
