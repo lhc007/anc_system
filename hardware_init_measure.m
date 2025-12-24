@@ -1,7 +1,7 @@
 function hw = hardware_init_measure(cfg)
 % hardware_init_measure
 % 初始测量硬件
-
+fprintf('[hardware-measure] 初始化硬件...\n');
 if ~isfield(cfg,'timeFrameSamples'), cfg.timeFrameSamples = 160; end
 
 hw = struct();

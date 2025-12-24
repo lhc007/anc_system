@@ -99,15 +99,15 @@ cfg.padTrailing       = 1;      % 扫频尾随静音时间（秒）
 cfg.amplitude         = 0.98;   % 扫频信号幅值（接近满幅但避免削波）
 cfg.sweepDuration     = 5;      % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
 cfg.minSnrForReliable = 3; 
-cfg.spkAmplitude      = [1.0, 1.0];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
+cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
 cfg.sweepF1           = 80;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
 cfg.sweepF2           = 1200;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 cfg.repetitions       = 1;                     % 重复播放并录制次数；用于提高 SNR 和鲁棒性
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
-cfg.irMaxLen          = 16384;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
+cfg.irMaxLen          = 4096;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
 cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
-cfg.saveFirstRaw      = false;                 % 是否保存第一次原始录音（用于调试）
+cfg.saveFirstRaw      = true;                 % 是否保存第一次原始录音（用于调试）
 cfg.saveAllRaw        = true;                  % 是否保存所有重复的原始录音（占用磁盘空间）
 cfg.doAlignRepeats    = true;                  % 是否对多次重复测量进行时间对齐（false 保留真实延迟变化）
 cfg.exportAlignedIR   = true;                  % 是否导出对齐后的平均 IR（用于诊断）
@@ -118,15 +118,14 @@ cfg.writeBlockPad     = false;                 % 是否在播放块前后填充�
 % 峰与漂移相关参数
 cfg.enableLowFreqBoost    = false;             % 是否在扫频中增强低频能量（提升低频 SNR）
 cfg.lowFreqCutHz          = 80;                % 低频增强的截止频率（低于此频率按比例提升）
-cfg.lowFreqMixRatio       = 0.9;               % 低频增强混合比例（0.9 表示 90% 能量集中在低频段）
-cfg.minPhysDelaySamples   = 50;                % 物理最小延迟（样本）；用于剔除非物理解（如负延迟）
-cfg.maxPhysDelaySamples   = 300;               % 物理上可能的最大次级路径延迟（例如声音传播最远距离对应的样本数）。
+cfg.lowFreqMixRatio       = 0.8;               % 低频增强混合比例（0.9 表示 90% 能量集中在低频段）
 cfg.maxAllowedDriftSamples = 200;              % 允许的最大重复间延迟漂移（样本）；超限则标记不可靠
 cfg.enableRepeatAlignment = true;              % 是否启用重复测量间的自动对齐（基于互相关）
-
+cfg.enableRealTimeMonitor = true;
 % SNR 排除：尝试剔除低 SNR 重复
 cfg.excludeLowSNR         = true;              % 是否排除 SNR 低于阈值的重复测量
-cfg.snrThresholdDB        = 6;                 % SNR 可靠性阈值（dB）；低于此值视为不可用
+% SNR阈值
+cfg.snrThresholdDB = 10;                       % SNR 可靠性阈值（dB）；低于此值视为不可用
 
 % 可靠峰判定参数
 cfg.reliableMinRatio      = 0.30;              % 可靠重复占比阈值（如 4 次中有 ≥2 次可靠才接受）
@@ -139,16 +138,33 @@ cfg.outlierIQRMultiplier  = 1.2;               % IQR 倍数阈值；超出 [Q1 -
 cfg.deconvExtraTail       = cfg.irMaxLen + 3000; % 反卷积时额外补零长度（提升频率分辨率）
 cfg.prePeakKeep           = 256;                  % 主峰前保留的样本数（用于因果性检查）
 cfg.deconvPreDelayKeep    = 768;                 % 反卷积结果中强制保留的前导静音长度
-cfg.deconvPeakThreshDB    = 12;                   % 峰值检测阈值（dB，相对于最大值）；越低越敏感
-cfg.deconvMaxSearch       = 15000;                % 最大搜索延迟范围（样本）
+cfg.deconvMaxSearch       = 20000;                % 最大搜索延迟范围（样本）
 cfg.deconvRegEps          = 1e-4;                % Tikhonov 正则化参数；抑制噪声放大（值越大越平滑）
-cfg.deconvNoiseWin        = 1200;                % 用于估计噪声功率的窗口长度（样本）
+cfg.deconvNoiseWin        = 800;                % 用于估计噪声功率的窗口长度（样本）
 cfg.deconvEnvSmoothWin    = 10;                  % 包络平滑窗口长度（样本）
-cfg.deconvCumEnergyFrac   = 0.05;                % 累积能量达到该比例时视为有效起点
-cfg.deconvMinPeakFrac     = 0.005;               % ✅ 修复：从0.02降低到0.005，解决高SNR低比例问题
 cfg.deconvSnrBodyRadius   = 96;                  % SNR 计算时主峰邻域半径（样本）
 cfg.deconvFftCorrEnable   = true;                % 是否启用 FFT 域互相关辅助峰值定位
 cfg.deconvDebugMode       = true;                % ✅ 新增：启用deconvolve_sweep的调试模式
+
+% 在 anc_config.m 中添加
+cfg.minPhysDelaySamples = round(0.002 * cfg.fs); % 2ms = 96样本 最小物理延迟（样本）
+cfg.maxPhysDelaySamples = round(00.1 * cfg.fs);    % 100ms = 4800样本 最大物理延迟（样本）
+cfg.delaySearchRadius = 2000;   % 延迟搜索半径（样本）
+cfg.peakRefineRadius = 150;     % 峰值细化半径（样本）
+
+% 预回声容忍度分级
+cfg.preEchoSevereThresh = 0.15; % 严重预回声阈值
+cfg.preEchoModerateThresh = 0.05; % 中等预回声阈值
+
+% 增加以下参数
+cfg.enableIRDiagnostic = true;  % 启用IR诊断数据保存
+cfg.peakDetectionMinDistance = 100;  % 峰值最小距离
+cfg.peakDetectionProminence = 0.1;   % 峰值显著性阈值
+
+% 修改反卷积参数
+cfg.deconvPeakThreshDB = 12;     % ✅ 提高峰值检测阈值，从12提高到15
+cfg.deconvCumEnergyFrac = 0.05;  % ✅ 提高累积能量阈值，从0.05提高到0.10
+cfg.deconvMinPeakFrac = 0.005;   % ✅ 提高最小峰值比例，从0.005提高到0.008
 
 %% ========== 反馈路径测量参数 (Feedback Path) ==========
 % 扫频信号设置
@@ -171,7 +187,6 @@ cfg.fbCorrMin         = 0.75;         % 重复测量间互相关系数下限；�
 
 % 冲激响应截断
 cfg.fbEnergyCutRatio  = 0.9995;       % 保留 IR 总能量的 99.95% 以确定截断点
-cfg.irMaxLen          = 4096;         % （复用）最大 IR 长度（样本）
 cfg.irTruncateLen     = 0;            % 强制截断长度（0 表示自动）
 
 %% 时序与步长
@@ -236,10 +251,6 @@ cfg.adaptiveDelaySmoothAlpha = 0.3;
 % 单次允许的最大/最小延迟变化（样本）
 cfg.adaptiveDelayMaxChangeSamples = round(0.02 * cfg.fs); 
 cfg.adaptiveDelayMinChangeSamples = 1; 
-
-% 全局允许的延迟范围（样本）
- cfg.minDelaySamples = 0; 
-cfg.maxDelaySamples = round(0.1 * cfg.fs); 
 
 % 初始延迟（可覆盖来自次级路径文件的估计）
 cfg.initialDelaySamples = round(0.0012 * cfg.fs); 
