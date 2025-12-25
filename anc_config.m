@@ -79,6 +79,11 @@ cfg.outputAudioFile   = 'anc_output.wav';                          % ANC 处理�
 cfg.noiseFile         = 'road_noise.wav';                          % 原始单通道路噪样本（用于生成仿真数据）
 
 %% 次级路径录制（测量专用参数）
+cfg.deviceLatencySamples = 128;  % 硬件延迟（需预先标定）
+cfg.enableSubsampleRefinement = true;  % 启用子样本细化
+cfg.delayEstimationMethods = {'energy', 'phase', 'group', 'direct', 'tf'};
+cfg.minPhysicalDistanceMeters = 0.05;  % 最小物理距离
+cfg.maxPhysicalDistanceMeters = 5.0;   % 最大物理距离
 
 cfg.saveEachRepeatIR = true;      % 保存每个repeat的IR用于后期分析
 cfg.saveDiagnosticInfo = true;     % 保存完整的元数据
