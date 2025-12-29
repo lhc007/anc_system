@@ -10,6 +10,7 @@ function metrics = assess_ir_quality(irData, snrData, peakPosData, coherenceEst,
 % 输出:
 %   metrics: 质量指标结构体
 
+fprintf('[assess_ir_quality] 开始IR质量评估');
 % 获取数据维度
 [numSamples, numMics, numReps] = size(irData);
 
@@ -24,7 +25,7 @@ medianSNR = median(snrMatrix(:));
 % 峰值位置稳定性
 if numReps > 1 && numMics > 1
     peakStd = std(peakPosMatrix(:));
-    peakRange = range(peakPosMatrix(:));
+    peakRange = max(peakPosMatrix(:)) - min(peakPosMatrix(:));
 else
     peakStd = 0;
     peakRange = 0;
@@ -34,7 +35,7 @@ end
 if numReps > 1
     stability = 1 - min(1, peakStd / 100); % 基于峰值标准差
 else
-    stability = 1; % 单次测量，稳定性为1
+    stability = NaN; % 单次测量，稳定性为1
 end
 
 % IR相似度（重复间一致性）
@@ -72,7 +73,7 @@ if numReps > 1
         avgSimilarity = 0;
     end
 else
-    avgSimilarity = 1; % 单次测量，相似度为1
+    avgSimilarity = NaN; 
 end
 
 % 能量分布

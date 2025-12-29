@@ -1,17 +1,13 @@
 function record_secondary_path_v3()
 % record_secondary_path_v3.m 多通道管道ANC次级路径测量系统
-% 版本：v4.2 优化版
-% 特性：自适应延迟估计、多通道同步处理、实时质量监控、抗混叠处理
-% 修正重点：
-%   - 修复延迟估计中的边界条件错误
-%   - 添加相干性检查功能
-%   - 改进错误处理逻辑
-%   - 移除IR幅度归一化（保留物理增益）
+% 版本：v4.3 稳定版
+% 特性：扫频起始点对齐、多通道同步处理、实时质量监控
 
 clear; clc;
 
 %% ============== 配置加载与验证 ==============
 cfg = anc_config();
+fs = cfg.fs();
 
 % 配置验证与自动修正
 fprintf('[init] 加载配置...\n');
@@ -26,53 +22,17 @@ fprintf('[init] 误差麦克风通道: %s\n', mat2str(errMicIdx));
 try
     %% ============== 生成激励信号 ==============
     fprintf('[signal] 生成ESS激励信号...\n');
-    [sweepCore, ~, ~] = generate_sweep_v3(cfg);
-    fs = cfg.fs();
-    
-    % --- 第一层：为 ESS 反卷积添加必要的前后静音（来自 cfg.padLeading/Trailing）---
-    padLeadSamples = round(cfg.padLeading * fs);
-    padTrailSamples = round(cfg.padTrailing * fs);
-    sweepWithEssPad = [zeros(padLeadSamples, 1); ...
-                       sweepCore; ...
-                       zeros(padTrailSamples, 1)];
-    
-    % --- 可选：低频增强（作用于纯扫频或带 pad 信号？建议作用于 sweepCore）---
-    if cfg.enableLowFreqBoost
-        % 示例：在 sweepCore 上叠加低频正弦（需确保长度一致）
-        t_core = (0:length(sweepCore)-1)' / fs;
-        lowFreqTone = 0.1 * sin(2*pi*20*t_core);  % 20Hz, 幅度0.1
-        sweepCoreBoosted = sweepCore + lowFreqTone;
-        
-        % 重新构建带 pad 的信号
-        sweepWithEssPad = [zeros(padLeadSamples, 1); ...
-                           sweepCoreBoosted; ...
-                           zeros(padTrailSamples, 1)];
-    else
-        % 已构建 sweepWithEssPad
-    end
-    
-    % --- 归一化驱动信号 ---
-    maxAmp = max(abs(sweepWithEssPad));
-    if maxAmp > 0
-        sweepDrive = sweepWithEssPad / maxAmp * cfg.amplitude;
-    else
-        sweepDrive = sweepWithEssPad * cfg.amplitude;
-    end
-    
-    % --- 第二层：为测量添加额外的前后静音（preSilenceSec / postSilenceSec）---
-    preSilence = zeros(round(cfg.preSilenceSec * fs), 1);
-    postSilence = zeros(round(cfg.postSilenceSec * fs), 1);
-    sweepSig = [preSilence; sweepDrive; postSilence];
+    [sweepCore_scaled, sweepSig, info] = generate_excitation_signal(cfg);
     
     % ========== 日志打印 ==========
-    sweepCoreLen = length(sweepCore);          % 真正的核心扫频长度
-    essTotalLen = length(sweepDrive);          % ESS激励总长（含ESS-pad）
-    totalSamples = length(sweepSig);           % 最终播放总长（含 pre/post silence）
+    sweepCoreLen = info.N;                  % 核心扫频长度
+    essTotalLen = info.totalLength; % ESS总长度
+    totalSamples = length(sweepSig); 
     
     fprintf('[signal] 信号参数:\n');
-    fprintf('  - 核心扫频时长: %.3f s (%d 样本)\n', cfg.sweepDuration, sweepCoreLen);
-    fprintf('  - ESS激励长度（含内部pad）: %d 样本\n', essTotalLen);
-    fprintf('  - 测量信号总长度: %d 样本\n', totalSamples);
+    fprintf('  - 核心扫频时长: %.3f s (%d 样本)\n', info.sweepDuration, sweepCoreLen);
+    fprintf('  - ESS激励总长: %d 样本 (含 %d ms 前静音, %d ms 后静音)\n', ...
+        essTotalLen, round(info.padLeading*1000), round(info.padTrailing*1000));
     fprintf('  - 采样率: %d Hz\n', fs);
 
     %% ============== 容器初始化 ==============
@@ -103,14 +63,15 @@ try
         % 扬声器特定数据结构
         spkData = struct();
         spkData.irRaw = cell(cfg.repetitions, 1);
+        spkData.irAligned = cell(cfg.repetitions, 1); % 新增：对齐后信号
         spkData.delayEst = zeros(cfg.repetitions, 1);
         spkData.snrEst = zeros(cfg.repetitions, numErrMics);
         spkData.peakPos = zeros(cfg.repetitions, numErrMics);
         spkData.coherenceEst = zeros(cfg.repetitions, numErrMics); % 新增相干性矩阵
         spkData.irFinal = zeros(Lh, numErrMics, cfg.repetitions);
         
-        % === 阶段1: 数据采集 ===
-        fprintf('[measure] 阶段1: 数据采集\n');
+        % === 阶段1: 数据采集（基于扫频起始点对齐） ===
+        fprintf('[measure] 阶段1: 数据采集（基于扫频起始点对齐）\n');
         
         for rep = 1:cfg.repetitions
             fprintf('  重复 %d/%d... ', rep, cfg.repetitions);
@@ -134,94 +95,86 @@ try
             end
             
             % 播放并录音
-            [recordedFull, playbackInfo] = play_and_record(hw, spkDriveSig, spk, cfg);
+            [recordedFull, ~] = play_and_record(hw, spkDriveSig, spk, cfg);
             
-            % 提取误差麦克风通道
-            recorded = recordedFull(:, errMicIdx);
+            % === 基于扫频起始点对齐 ===
+            [actual_start_idx, recorded_aligned] = align_sweep_start(...
+                recordedFull, errMicIdx, sweepCore_scaled, cfg);
             
-            % 保存原始数据
-            spkData.irRaw{rep} = recorded;
+            % 保存对齐后数据
+            spkData.irAligned{rep} = recorded_aligned;
+            
+            % 计算对齐后信号的相干性
+            for m = 1:numErrMics
+                spkData.coherenceEst(rep, m) = compute_mean_coherence(...
+                    recorded_aligned(:, m), sweepCore_scaled, fs);
+            end
             
             % 释放硬件
             hw.release();
             
-            fprintf('完成\n');
+            fprintf('完成 (扫频起始@%d, 对齐信号长度: %d)\n', actual_start_idx, size(recorded_aligned,1));
+        end
+
+        %% === 阶段2: 自适应延迟估计（基于对齐信号，多通道） ===
+        fprintf('[measure] 阶段2: 自适应延迟估计（基于对齐信号，多通道）\n');
+        
+        % 使用所有误差麦克风通道进行延迟估计
+        [allDelays, allConfidences, allCorrelations] = estimate_delay_multichannel(...
+            spkData.irAligned, sweepCore_scaled, cfg, numErrMics);
+        
+        % 使用高置信度通道的延迟（或加权平均）
+        highConfMask = allConfidences > 0.5; % 置信度阈值
+        if sum(highConfMask) >= 1
+            % 使用高置信度通道的加权平均
+            weights = allConfidences(highConfMask);
+            if sum(weights) > 0
+                weights = weights / sum(weights);
+                delayEstimate = round(sum(allDelays(highConfMask) .* weights));
+            else
+                delayEstimate = round(mean(allDelays));
+            end
+            fprintf('  使用加权平均延迟: %d 样本\n', delayEstimate);
+        else
+            % 所有通道置信度都低，使用第一个通道
+            delayEstimate = allDelays(1);
+            fprintf('  警告: 所有通道置信度低，使用通道1延迟: %d 样本\n', delayEstimate);
         end
         
-        % === 阶段2: 自适应延迟估计 ===
-        fprintf('[measure] 阶段2: 自适应延迟估计\n');
+        % 验证结果（基于最终选择的延迟）
+        delayStd = std(allDelays);
+        delayMean = mean(allDelays);
+        delayRange = max(allDelays) - min(allDelays);
+        fprintf('  延迟统计: 平均=%.1f, 标准差=%.1f, 范围=[%d,%d]\n', ...
+            delayMean, delayStd, min(allDelays), max(allDelays));
         
-        % 使用所有重复的平均信号进行延迟估计
-        allRecorded = zeros(size(spkData.irRaw{1}));
-        for rep = 1:cfg.repetitions
-            allRecorded = allRecorded + spkData.irRaw{rep};
+        if delayRange > round(0.01 * fs) % >10ms差异
+            fprintf('  警告: 通道间延迟差异较大 (%.1f ms)，可能影响精度\n', delayRange/fs*1000);
+            validationResult = struct('pass', false, 'confidence', 0.6, 'delay_global', delayEstimate, 'correlation', mean(allCorrelations));
+        else
+            validationResult = struct('pass', true, 'confidence', min(0.9, mean(allConfidences)), 'delay_global', delayEstimate, 'correlation', mean(allCorrelations));
         end
-        avgRecorded = allRecorded / cfg.repetitions;
-        
-        % ============== 延迟估计 ==============
-        % 采用三阶段估计策略
-        
-        % 阶段1: 基于物理约束和已知信息的初始估计
-        fprintf('    阶段1: 基于物理约束的初始估计\n');
-        preSilenceSamples = round(cfg.preSilenceSec * cfg.fs);
-        deviceLatency = cfg.deviceLatencySamples; % 硬件延迟，需要预先标定
-        
-        % 计算理论最小延迟
-        minTheoreticalDelay = preSilenceSamples + deviceLatency + cfg.minPhysDelaySamples;
-        
-        % 提取合适的信号段进行延迟估计
-        % 从理论最小延迟前100ms开始，避免错过早期到达
-        searchStart = max(1, minTheoreticalDelay - round(0.1 * cfg.fs));
-        searchEnd = min(size(avgRecorded,1), searchStart + length(sweepDrive) * 2);
-        
-        recordedSegment = avgRecorded(searchStart:searchEnd, 1);
-        
-        % 阶段2: 多算法融合的精确延迟估计
-        fprintf('    阶段2: 多算法融合精确估计\n');
-        [delayEstimate_raw, delayMetrics] = estimate_delay_industrial_advanced(...
-            recordedSegment, sweepDrive, cfg);
-        
-        % 阶段3: 修正为全局延迟并验证
-        delayEstimate_global = delayEstimate_raw + (searchStart - 1);
-        
-        % 物理合理性检查
-        [delayEstimate, validationResult] = validate_delay_estimate(...
-            delayEstimate_global, avgRecorded(:,1), sweepDrive, cfg);
-        
-        fprintf('    延迟估计结果:\n');
-        fprintf('      原始估计: %d 样本\n', delayEstimate_raw);
-        fprintf('      全局延迟: %d 样本 (%.3f ms)\n', ...
-            delayEstimate, delayEstimate/cfg.fs*1000);
-        fprintf('      物理检查: %s\n', ternary(validationResult.pass, '通过', '失败'));
-        fprintf('      置信度: %.1f%%\n', validationResult.confidence * 100);
         
         % 保存延迟估计的元数据
         spkData.delayEstimate = delayEstimate;
-        spkData.delayMetrics = delayMetrics;
         spkData.delayValidation = validationResult;
+        spkData.delayPerChannel = allDelays;        % 新增：各通道延迟
+        spkData.delayConfidence = allConfidences;   % 新增：各通道置信度
+        spkData.delayCorrelation = allCorrelations; % 新增：各通道相关性
         
-        % === 阶段3: 精确反卷积 ===
-        fprintf('[measure] 阶段3: 脉冲响应提取\n');
+        % === 阶段3: 精确反卷积（使用对齐信号） ===
+        fprintf('[measure] 阶段3: 脉冲响应提取（使用对齐信号）\n');
         
         for rep = 1:cfg.repetitions
             fprintf('  处理重复 %d... ', rep);
             
-            % 确定截取窗口（增强鲁棒性）
-            extractStart = max(1, delayEstimate - round(0.1*cfg.fs)); % 提前100ms
-            extractEnd = min(size(spkData.irRaw{rep},1), ...
-                extractStart + sweepCoreLen + Lh*2);
-            
-            if extractEnd - extractStart < sweepCoreLen + Lh
-                extractStart = max(1, extractEnd - (sweepCoreLen + Lh*2));
-            end
-            
-            % 对每个麦克风进行反卷积
+            % 使用对齐后的信号进行反卷积
             for m = 1:numErrMics
-                % 截取信号段
-                recSegment = spkData.irRaw{rep}(extractStart:extractEnd, m);
+                % 对齐后的信号段
+                recSegment = spkData.irAligned{rep}(:, m);
                 
-                % 反卷积（内部使用能量比SNR）
-                irResult = deconv_industrial(recSegment, sweepDrive, cfg);
+                % 反卷积（使用sweepCore_scaled）
+                irResult = deconv_industrial(recSegment, sweepCore_scaled, cfg);
                 
                 % 保存结果
                 irLength = min(Lh, length(irResult.ir));
@@ -231,20 +184,6 @@ try
             end
             
             fprintf('完成\n');
-        end
-        
-        % === 阶段4: 数据质量评估 ===
-        fprintf('[measure] 阶段4: 质量评估\n');
-        
-        % 添加相干性检查（对每个重复和麦克风）
-        spkData.coherenceEst = zeros(cfg.repetitions, numErrMics);
-        for rep = 1:cfg.repetitions
-            for m = 1:numErrMics
-                % 使用记录的原始信号和激励信号计算相干性
-                rec_segment = spkData.irRaw{rep}(:, m);
-                spkData.coherenceEst(rep, m) = compute_mean_coherence(...
-                    rec_segment, sweepDrive, cfg.fs);
-            end
         end
 
         % 计算统计指标
@@ -257,7 +196,7 @@ try
         if usable
             fprintf('[measure] 阶段5: 数据平均\n');
             
-            % 对齐所有重复
+            % 对齐所有重复（基于峰值位置）
             irAligned = align_impulse_responses(spkData.irFinal, spkData.peakPos, cfg);
             
             % 加权平均（基于SNR）
@@ -273,8 +212,8 @@ try
                 irAvg = mean(irAligned, 3);
             end
             
-            % 最终IR处理（注意：不再归一化！）
-            irAvg = postprocess_ir(irAvg, cfg);  % 此函数应移除归一化
+            % 最终IR处理
+            irAvg = postprocess_ir(irAvg, cfg);
             
             % 保存到主容器
             impulseResponses(:, :, spk) = irAvg;
@@ -292,12 +231,14 @@ try
         % 保存元数据
         meta.perSpeaker{spk} = struct(...
             'delayEstimate', delayEstimate, ...
+            'delayPerChannel', spkData.delayPerChannel, ...  % 新增
+            'delayConfidence', spkData.delayConfidence, ...  % 新增
             'qualityMetrics', qualityMetrics, ...
             'usable', usable, ...
             'snrEst', spkData.snrEst, ...
             'peakPos', spkData.peakPos, ...
             'coherenceEst', spkData.coherenceEst, ... % 新增
-            'extractWindow', [extractStart, extractEnd]);
+            'alignmentMethod', 'sweep_start_point'); % 新增对齐方法
         
         fprintf('[measure] 扬声器 %d 完成: %s\n', spk, ternary(usable, '可用', '不可用'));
     end
@@ -312,10 +253,10 @@ try
     secondary.numMics = numErrMics;
     secondary.errorMicPhysicalChannels = errMicIdx;
     secondary.irLength = Lh;
-    secondary.description = 'Industrial-grade secondary path (v4.2 - optimized)';
+    secondary.description = 'Industrial-grade secondary path (v4.3 - sweep start alignment)';
     secondary.timestamp = datetime('now', 'TimeZone', 'local');
     secondary.measurementInfo = struct(...
-        'sweepLength', totalSamples, ...
+        'sweepLength', length(sweepSig), ...
         'sweepCoreLength', sweepCoreLen, ...
         'repetitions', cfg.repetitions, ...
         'irMaxLen', Lh);
@@ -390,11 +331,11 @@ end
 
 fprintf('\n[complete] 程序结束\n');
 
-end % ← 主函数结束
+end 
 
 %% ========================================================================
-%% 子函数定义
-%% ========================================================================
+% 子函数定义
+% ========================================================================
 
 function cfg = validate_config(cfg)
 % 配置验证与修正
@@ -414,7 +355,7 @@ if cfg.minPhysDelaySamples < 1
 end
 
 if cfg.maxPhysDelaySamples < cfg.minPhysDelaySamples + 100
-    cfg.maxPhysDelaySamples = cfg.minPhysDelaySamples + 10000;
+    cfg.maxPhysDelaySamples = cfg.minPhysDelaySamples + 100000;
     fprintf('[config] 警告: maxPhysDelaySamples调整到%d\n', cfg.maxPhysDelaySamples);
 end
 
@@ -425,7 +366,7 @@ end
 
 % 设置默认值
 if ~isfield(cfg, 'deconvRegEps')
-    cfg.deconvRegEps = 1e-12;
+    cfg.deconvRegEps = 1e-6;  % 修复：降低正则化参数
 end
 if ~isfield(cfg, 'enableLowFreqBoost')
     cfg.enableLowFreqBoost = false;
@@ -436,9 +377,14 @@ end
 if ~isfield(cfg, 'generateReport')
     cfg.generateReport = false;
 end
+% 新增默认相干性阈值
 if ~isfield(cfg, 'coherenceThreshold')
-    cfg.coherenceThreshold = 0.7; % 新增默认相干性阈值
+    cfg.coherenceThreshold = 0.7; 
 end
+if ~isfield(cfg, 'deconvPreDelayKeep')
+    cfg.deconvPreDelayKeep = 10000;  % 修复：设置合理的前延迟
+end
+
 end
 
 function str = ternary(condition, trueStr, falseStr)

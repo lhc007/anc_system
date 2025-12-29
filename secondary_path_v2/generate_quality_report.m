@@ -58,7 +58,6 @@ if usejava('desktop')
 end
 end
 
-
 function visualize_results(secondary, meta, cfg)
 % 结果可视化
 % 生成IR波形图和频响图
@@ -132,13 +131,4 @@ title(sprintf('可用性统计 (%d/%d)', usableCount, cfg.numSpeakers));
 % 保存图像
 saveDir = fileparts(cfg.secondaryPathFile);
 saveas(gcf, fullfile(saveDir, 'secondary_path_visualization.png'));
-end
-
-function str = ternary(condition, trueStr, falseStr)
-% 三元操作符模拟
-if condition
-    str = trueStr;
-else
-    str = falseStr;
-end
 end

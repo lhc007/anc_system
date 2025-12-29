@@ -35,13 +35,17 @@ for b = 1:numBlocks
     micFrame = hw.reader();
     
     % 处理可能的尺寸不匹配
-    if isempty(micFrame)
-        micFrame = zeros(blockSize, cfg.micNumChannels);
-    elseif size(micFrame, 1) < blockSize
-        micFrame(end+1:blockSize, :) = 0;
-    elseif size(micFrame, 1) > blockSize
-        micFrame = micFrame(1:blockSize, :);
-    end
+        if isempty(micFrame)
+            micFrame = zeros(blockSize, cfg.micNumChannels);
+        elseif size(micFrame, 2) ~= cfg.micNumChannels
+            % 如果列数不匹配，截断或填充
+            if size(micFrame, 2) > cfg.micNumChannels
+                micFrame = micFrame(:, 1:cfg.micNumChannels);
+            else
+                % 填充到正确列数
+                micFrame = [micFrame, zeros(blockSize, cfg.micNumChannels - size(micFrame, 2))];
+            end
+        end
     
     % 保存录音
     recorded(recPtr:recPtr+blockSize-1, :) = micFrame;
@@ -60,4 +64,5 @@ info = struct(...
     'totalSamples', totalSamples, ...
     'actualSamples', size(recorded, 1), ...
     'blocksPlayed', numBlocks);
+
 end

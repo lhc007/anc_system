@@ -79,7 +79,7 @@ cfg.outputAudioFile   = 'anc_output.wav';                          % ANC 处理�
 cfg.noiseFile         = 'road_noise.wav';                          % 原始单通道路噪样本（用于生成仿真数据）
 
 %% 次级路径录制（测量专用参数）
-cfg.deviceLatencySamples = 128;  % 硬件延迟（需预先标定）
+cfg.deviceLatencySamples = 1024;  % 硬件延迟（需预先标定）
 cfg.enableSubsampleRefinement = true;  % 启用子样本细化
 cfg.delayEstimationMethods = {'energy', 'phase', 'group', 'direct', 'tf'};
 cfg.minPhysicalDistanceMeters = 0.05;  % 最小物理距离
@@ -88,27 +88,31 @@ cfg.maxPhysicalDistanceMeters = 5.0;   % 最大物理距离
 cfg.saveEachRepeatIR = true;      % 保存每个repeat的IR用于后期分析
 cfg.saveDiagnosticInfo = true;     % 保存完整的元数据
 cfg.enableAutoGainAdjustment =true; %SNR过低时给出增益调整建议
-
+cfg.enableHardwareCalibration = true;
 % sweepCfg参数（扫频信号生成）
-cfg.padLeading        = 0.3;    % 扫频前导静音时间（秒）
-cfg.padTrailing       = 0.3;      % 扫频尾随静音时间（秒）
-cfg.amplitude         = 0.8;   % 扫频信号幅值（接近满幅但避免削波）
-cfg.sweepDuration     = 5;      % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
+
+cfg.channel_out = 1;
+cfg.channel_in = 1;
+
+cfg.padLeading        = 0.8;      % % 扫频前导静音（秒）——包含硬件稳定时间 + ESS反卷积所需padding
+cfg.padTrailing       = 0.5;      % 扫频尾随静音时间（秒）
+cfg.maxTotalDelaySec = 1.0;         % 最大物理延迟(秒)
+cfg.amplitude         = 0.95;       % 扫频信号幅值（接近满幅但避免削波）
+cfg.sweepDuration     = 5;          % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
 cfg.minSnrForReliable = 3; 
 cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
-cfg.sweepF1           = 100;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
-cfg.sweepF2           = 4000;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
+cfg.sweepF1           = 50;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
+cfg.sweepF2           = 800;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 cfg.repetitions       = 1;                     % 重复播放并录制次数；用于提高 SNR 和鲁棒性
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
-cfg.irMaxLen          = 4096;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
+cfg.irMaxLen          = 2048;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
 cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
 cfg.saveFirstRaw      = true;                 % 是否保存第一次原始录音（用于调试）
 cfg.saveAllRaw        = true;                  % 是否保存所有重复的原始录音（占用磁盘空间）
 cfg.doAlignRepeats    = true;                  % 是否对多次重复测量进行时间对齐（false 保留真实延迟变化）
 cfg.exportAlignedIR   = true;                  % 是否导出对齐后的平均 IR（用于诊断）
-cfg.preSilenceSec     = 0.8;                   % 扫频前静音时间（秒），确保系统稳定
-cfg.postSilenceSec    = 0.4;                   % 扫频后静音时间（秒），捕获完整 IR 尾部
+
 cfg.writeBlockPad     = false;                 % 是否在播放块前后填充静音（避免突发）
 
 % 峰与漂移相关参数
@@ -120,8 +124,11 @@ cfg.enableRepeatAlignment = true;              % 是否启用重复测量间的�
 cfg.enableRealTimeMonitor = true;
 % SNR 排除：尝试剔除低 SNR 重复
 cfg.excludeLowSNR         = true;              % 是否排除 SNR 低于阈值的重复测量
+
 % SNR阈值
-cfg.snrThresholdDB = 10;                       % SNR 可靠性阈值（dB）；低于此值视为不可用
+cfg.snrThresholdDB = 5;                       % SNR 可靠性阈值（dB）；低于此值视为不可用
+% 相干性阈值
+cfg.coherenceThreshold = 0.7; 
 
 % 可靠峰判定参数
 cfg.reliableMinRatio      = 0.30;              % 可靠重复占比阈值（如 4 次中有 ≥2 次可靠才接受）
@@ -144,7 +151,7 @@ cfg.deconvDebugMode       = true;                % ✅ 新增：启用deconvolve
 
 % 在 anc_config.m 中添加
 cfg.minPhysDelaySamples = 50; % 2ms = 96样本 最小物理延迟（样本）
-cfg.maxPhysDelaySamples = 2000;    % 100ms = 4800样本 最大物理延迟（样本）
+cfg.maxPhysDelaySamples = 5000;    % 100ms = 4800样本 最大物理延迟（样本）
 cfg.delaySearchRadius = 500;   % 延迟搜索半径（样本）
 cfg.peakRefineRadius = 150;     % 峰值细化半径（样本）
 cfg.peakRefineEnable = true;   % 峰值优化
