@@ -26,7 +26,7 @@ function mean_coherence = compute_mean_coherence(recorded, sweep, fs)
     % 不要加全局窗！mscohere 内部处理
     try
         % 使用合理参数：段长2048，重叠50%，避免过长段
-        [Cxy, f] = mscohere(recorded, sweep, hann(2048), 1024, [], fs);
+        [Cxy, f] = mscohere(sweep, recorded,  hann(2048), 1024, [], fs);
         
         % 关注 ANC 频段 (20–1000 Hz) - 扩展频段
         freq_mask = (f >= 20) & (f <= 1000);
