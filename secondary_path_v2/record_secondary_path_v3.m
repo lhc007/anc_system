@@ -1,7 +1,6 @@
 function record_secondary_path_v3()
 % record_secondary_path_v3.m 多通道管道ANC次级路径测量系统
-% 版本：v4.3 稳定版
-% 特性：扫频起始点对齐、多通道同步处理、实时质量监控
+% 版本：v4.5
 
 clear; clc;
 
@@ -24,9 +23,9 @@ try
     fprintf('[signal] 生成ESS激励信号...\n');
     [sweepCore_scaled, sweepSig, info] = generate_excitation_signal(cfg);
     
-    % ========== 日志打印 ==========
+    % ========== 信号验证 ==========
     sweepCoreLen = info.N;                  % 核心扫频长度
-    essTotalLen = info.totalLength; % ESS总长度
+    essTotalLen = info.totalLength;         % ESS总长度
     totalSamples = length(sweepSig); 
     
     fprintf('[signal] 信号参数:\n');
@@ -34,6 +33,13 @@ try
     fprintf('  - ESS激励总长: %d 样本 (含 %d ms 前静音, %d ms 后静音)\n', ...
         essTotalLen, round(info.padLeading*1000), round(info.padTrailing*1000));
     fprintf('  - 采样率: %d Hz\n', fs);
+    
+    % 验证扫频信号长度
+    if length(sweepCore_scaled) ~= sweepCoreLen
+        error('扫频核心长度不匹配！sweepCore_scaled长度为%d，应为%d', ...
+            length(sweepCore_scaled), sweepCoreLen);
+    end
+    fprintf('  [验证] sweepCore_scaled长度: %d (正确)\n', length(sweepCore_scaled));
 
     %% ============== 容器初始化 ==============
     Lh = cfg.irMaxLen;
@@ -63,11 +69,11 @@ try
         % 扬声器特定数据结构
         spkData = struct();
         spkData.irRaw = cell(cfg.repetitions, 1);
-        spkData.irAligned = cell(cfg.repetitions, 1); % 新增：对齐后信号
+        spkData.irAligned = cell(cfg.repetitions, 1);
         spkData.delayEst = zeros(cfg.repetitions, 1);
         spkData.snrEst = zeros(cfg.repetitions, numErrMics);
         spkData.peakPos = zeros(cfg.repetitions, numErrMics);
-        spkData.coherenceEst = zeros(cfg.repetitions, numErrMics); % 新增相干性矩阵
+        spkData.coherenceEst = zeros(cfg.repetitions, numErrMics);
         spkData.irFinal = zeros(Lh, numErrMics, cfg.repetitions);
         
         % === 阶段1: 数据采集（基于扫频起始点对齐） ===
@@ -97,23 +103,18 @@ try
             % 播放并录音
             [recordedFull, ~] = play_and_record(hw, spkDriveSig, spk, cfg);
             
-            % === 基于扫频起始点对齐 ===
+            % 基于扫频起始点对齐
             [actual_start_idx, recorded_aligned] = align_sweep_start(...
                 recordedFull, errMicIdx, sweepCore_scaled, cfg);
             
             % 保存对齐后数据
             spkData.irAligned{rep} = recorded_aligned;
             
-            % 计算对齐后信号的相干性
-            for m = 1:numErrMics
-                spkData.coherenceEst(rep, m) = compute_mean_coherence(...
-                    recorded_aligned(:, m), sweepCore_scaled, fs);
-            end
-            
             % 释放硬件
             hw.release();
             
-            fprintf('完成 (扫频起始@%d, 对齐信号长度: %d)\n', actual_start_idx, size(recorded_aligned,1));
+            fprintf('完成 (扫频起始@%d, 对齐信号长度: %d)\n', ...
+                actual_start_idx, size(recorded_aligned,1));
         end
 
         %% === 阶段2: 自适应延迟估计（基于对齐信号，多通道） ===
@@ -148,19 +149,22 @@ try
         fprintf('  延迟统计: 平均=%.1f, 标准差=%.1f, 范围=[%d,%d]\n', ...
             delayMean, delayStd, min(allDelays), max(allDelays));
         
-        if delayRange > round(0.01 * fs) % >10ms差异
+        % 更严格的延迟范围检查（5ms）
+        if delayRange > round(0.005 * fs) % >5ms差异
             fprintf('  警告: 通道间延迟差异较大 (%.1f ms)，可能影响精度\n', delayRange/fs*1000);
-            validationResult = struct('pass', false, 'confidence', 0.6, 'delay_global', delayEstimate, 'correlation', mean(allCorrelations));
+            validationResult = struct('pass', false, 'confidence', 0.6, ...
+                'delay_global', delayEstimate, 'correlation', mean(allCorrelations));
         else
-            validationResult = struct('pass', true, 'confidence', min(0.9, mean(allConfidences)), 'delay_global', delayEstimate, 'correlation', mean(allCorrelations));
+            validationResult = struct('pass', true, 'confidence', min(0.9, mean(allConfidences)), ...
+                'delay_global', delayEstimate, 'correlation', mean(allCorrelations));
         end
         
         % 保存延迟估计的元数据
         spkData.delayEstimate = delayEstimate;
         spkData.delayValidation = validationResult;
-        spkData.delayPerChannel = allDelays;        % 新增：各通道延迟
-        spkData.delayConfidence = allConfidences;   % 新增：各通道置信度
-        spkData.delayCorrelation = allCorrelations; % 新增：各通道相关性
+        spkData.delayPerChannel = allDelays;
+        spkData.delayConfidence = allConfidences;
+        spkData.delayCorrelation = allCorrelations;
         
         % === 阶段3: 精确反卷积（使用对齐信号） ===
         fprintf('[measure] 阶段3: 脉冲响应提取（使用对齐信号）\n');
@@ -172,27 +176,34 @@ try
             for m = 1:numErrMics
                 % 对齐后的信号段
                 recSegment = spkData.irAligned{rep}(:, m);
-                
-                % 反卷积（使用sweepCore_scaled）
+                fprintf('[DEBUG] 反卷积参数: irMaxLen=%d, regEps=%.1e\n', ...
+                    cfg.irMaxLen, cfg.deconvRegEps);
+                % 反卷积
                 irResult = deconv_industrial(recSegment, sweepCore_scaled, cfg);
                 
-                % 保存结果
+                % 保存IR结果
                 irLength = min(Lh, length(irResult.ir));
                 spkData.irFinal(1:irLength, m, rep) = irResult.ir(1:irLength);
                 spkData.snrEst(rep, m) = irResult.snr;
                 spkData.peakPos(rep, m) = irResult.peakPos;
+                
+                % 修复：使用重建相干性计算方法
+                % 比较实际录制信号与通过提取IR重建的信号
+                spkData.coherenceEst(rep, m) = compute_reconstruction_coherence(...
+                    recSegment, sweepCore_scaled, irResult.ir, fs);
             end
             
             fprintf('完成\n');
         end
 
         % 计算统计指标
-        qualityMetrics = assess_ir_quality(spkData.irFinal, spkData.snrEst, spkData.peakPos, spkData.coherenceEst, cfg);
+        qualityMetrics = assess_ir_quality(spkData.irFinal, spkData.snrEst, ...
+            spkData.peakPos, spkData.coherenceEst, cfg);
         
         % 判断是否可用
         usable = qualityMetrics.usable;
         
-        % === 阶段5: 平均与对齐 ===
+        % === 阶段5: 数据平均 ===
         if usable
             fprintf('[measure] 阶段5: 数据平均\n');
             
@@ -222,23 +233,34 @@ try
                 qualityMetrics.medianSNR, qualityMetrics.stability, qualityMetrics.meanCoherence);
         else
             fprintf('[measure] 警告: 数据质量不足，使用零IR\n');
-            fprintf('  原因: SNR=%.1f dB (阈值%.1f), 相干性=%.2f (阈值%.2f)\n', ...
-                qualityMetrics.medianSNR, cfg.snrThresholdDB, ...
-                qualityMetrics.meanCoherence, 0.7);
+            fprintf('  原因:\n');
+            if ~qualityMetrics.snrOK
+                fprintf('    - SNR=%.1f dB < 阈值%.1f dB\n', ...
+                    qualityMetrics.medianSNR, cfg.snrThresholdDB);
+            end
+            if ~qualityMetrics.coherenceOK
+                fprintf('    - 相干性=%.2f < 阈值%.2f\n', ...
+                    qualityMetrics.medianCoherence, cfg.coherenceThreshold);
+            end
+            if ~qualityMetrics.stablePeaks && cfg.repetitions > 1
+                fprintf('    - 峰值标准差=%.1f > 阈值%.1f\n', ...
+                    qualityMetrics.peakStd, cfg.maxPeakStd);
+            end
             impulseResponses(:, :, spk) = zeros(Lh, numErrMics);
         end
         
         % 保存元数据
         meta.perSpeaker{spk} = struct(...
             'delayEstimate', delayEstimate, ...
-            'delayPerChannel', spkData.delayPerChannel, ...  % 新增
-            'delayConfidence', spkData.delayConfidence, ...  % 新增
+            'delayPerChannel', spkData.delayPerChannel, ...
+            'delayConfidence', spkData.delayConfidence, ...
             'qualityMetrics', qualityMetrics, ...
             'usable', usable, ...
             'snrEst', spkData.snrEst, ...
             'peakPos', spkData.peakPos, ...
-            'coherenceEst', spkData.coherenceEst, ... % 新增
-            'alignmentMethod', 'sweep_start_point'); % 新增对齐方法
+            'coherenceEst', spkData.coherenceEst, ...
+            'alignmentMethod', 'sweep_start_point', ...
+            'coherenceMethod', 'reconstruction_coherence'); % 新增：记录相干性计算方法
         
         fprintf('[measure] 扬声器 %d 完成: %s\n', spk, ternary(usable, '可用', '不可用'));
     end
@@ -253,13 +275,14 @@ try
     secondary.numMics = numErrMics;
     secondary.errorMicPhysicalChannels = errMicIdx;
     secondary.irLength = Lh;
-    secondary.description = 'Industrial-grade secondary path (v4.3 - sweep start alignment)';
+    secondary.description = 'Industrial-grade secondary path (v4.5 - 修复相干性计算)';
     secondary.timestamp = datetime('now', 'TimeZone', 'local');
     secondary.measurementInfo = struct(...
         'sweepLength', length(sweepSig), ...
         'sweepCoreLength', sweepCoreLen, ...
         'repetitions', cfg.repetitions, ...
-        'irMaxLen', Lh);
+        'irMaxLen', Lh, ...
+        'coherenceMethod', 'reconstruction_based'); % 新增：记录相干性计算方法
     
     % 计算推荐延迟
     delayVector = zeros(1, cfg.numSpeakers);
@@ -299,6 +322,23 @@ try
     fprintf('\n%s\n', repmat('=', 1, 60));
     fprintf('[success] 次级路径测量完成!\n');
     fprintf('%s\n', repmat('=', 1, 60));
+    
+    % 打印最终统计
+    fprintf('\n[统计] 测量结果汇总:\n');
+    usableCount = 0;
+    for i = 1:cfg.numSpeakers
+        if meta.perSpeaker{i}.usable
+            usableCount = usableCount + 1;
+            fprintf('  扬声器 %d: SNR=%.1f dB, 相干性=%.2f, 延迟=%d样本\n', ...
+                i, meta.perSpeaker{i}.qualityMetrics.medianSNR, ...
+                meta.perSpeaker{i}.qualityMetrics.medianCoherence, ...
+                meta.perSpeaker{i}.delayEstimate);
+        else
+            fprintf('  扬声器 %d: 不可用\n', i);
+        end
+    end
+    fprintf('  可用率: %d/%d (%.1f%%)\n', usableCount, cfg.numSpeakers, ...
+        usableCount/cfg.numSpeakers*100);
     
 catch ME
     fprintf('\n[ERROR] 测量过程中发生错误:\n');
@@ -364,25 +404,8 @@ if cfg.repetitions < 1
     fprintf('[config] 警告: repetitions调整到1\n');
 end
 
-% 设置默认值
-if ~isfield(cfg, 'deconvRegEps')
-    cfg.deconvRegEps = 1e-6;  % 修复：降低正则化参数
-end
-if ~isfield(cfg, 'enableLowFreqBoost')
-    cfg.enableLowFreqBoost = false;
-end
-if ~isfield(cfg, 'saveDiagnosticInfo')
-    cfg.saveDiagnosticInfo = true;
-end
-if ~isfield(cfg, 'generateReport')
-    cfg.generateReport = false;
-end
-% 新增默认相干性阈值
-if ~isfield(cfg, 'coherenceThreshold')
-    cfg.coherenceThreshold = 0.7; 
-end
 if ~isfield(cfg, 'deconvPreDelayKeep')
-    cfg.deconvPreDelayKeep = 10000;  % 修复：设置合理的前延迟
+    cfg.deconvPreDelayKeep = 10000;
 end
 
 end

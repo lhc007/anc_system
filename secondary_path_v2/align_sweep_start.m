@@ -67,3 +67,5 @@ end
 % 截取对齐后的扫频响应段
 recorded_aligned = recordedFull(actual_start_idx:sweep_end_idx, errMicIdx);
 end
+
+

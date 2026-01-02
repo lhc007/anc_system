@@ -105,7 +105,7 @@ cfg.sweepF1           = 50;                    % 扫频信号起始频率（Hz�
 cfg.sweepF2           = 800;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 cfg.repetitions       = 1;                     % 重复播放并录制次数；用于提高 SNR 和鲁棒性
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
-cfg.irMaxLen          = 2048;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
+cfg.irMaxLen          = 48000;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
 cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
 cfg.saveFirstRaw      = true;                 % 是否保存第一次原始录音（用于调试）
@@ -126,7 +126,7 @@ cfg.enableRealTimeMonitor = true;
 cfg.excludeLowSNR         = true;              % 是否排除 SNR 低于阈值的重复测量
 
 % SNR阈值
-cfg.snrThresholdDB = 5;                       % SNR 可靠性阈值（dB）；低于此值视为不可用
+cfg.snrThresholdDB = 15;                       % SNR 可靠性阈值（dB）；低于此值视为不可用
 % 相干性阈值
 cfg.coherenceThreshold = 0.7; 
 
@@ -142,22 +142,22 @@ cfg.deconvExtraTail       = cfg.irMaxLen + 3000; % 反卷积时额外补零长�
 cfg.prePeakKeep           = 256;                  % 主峰前保留的样本数（用于因果性检查）
 cfg.deconvPreDelayKeep    = 768;                 % 反卷积结果中强制保留的前导静音长度
 cfg.deconvMaxSearch       = 20000;                % 最大搜索延迟范围（样本）
-cfg.deconvRegEps          = 1e-4;                % Tikhonov 正则化参数；抑制噪声放大（值越大越平滑）
+cfg.deconvRegEps          = 1e-6;                % Tikhonov 正则化参数；抑制噪声放大（值越大越平滑）
 cfg.deconvNoiseWin        = 800;                % 用于估计噪声功率的窗口长度（样本）
 cfg.deconvEnvSmoothWin    = 10;                  % 包络平滑窗口长度（样本）
 cfg.deconvSnrBodyRadius   = 96;                  % SNR 计算时主峰邻域半径（样本）
-cfg.deconvFftCorrEnable   = false;                % 是否启用 FFT 域互相关辅助峰值定位
+cfg.deconvFftCorrEnable   = false;               % 是否启用 FFT 域互相关辅助峰值定位
 cfg.deconvDebugMode       = true;                % ✅ 新增：启用deconvolve_sweep的调试模式
 
 % 在 anc_config.m 中添加
-cfg.minPhysDelaySamples = 50; % 2ms = 96样本 最小物理延迟（样本）
-cfg.maxPhysDelaySamples = 5000;    % 100ms = 4800样本 最大物理延迟（样本）
-cfg.delaySearchRadius = 500;   % 延迟搜索半径（样本）
-cfg.peakRefineRadius = 150;     % 峰值细化半径（样本）
-cfg.peakRefineEnable = true;   % 峰值优化
+cfg.minPhysDelaySamples = 50;           % 2ms = 96样本 最小物理延迟（样本）
+cfg.maxPhysDelaySamples = 10000;        % 修复：最大物理延迟从5000增加到10000样本（约208ms），适应更长延迟
+cfg.delaySearchRadius = 500;            % 延迟搜索半径（样本）
+cfg.peakRefineRadius = 150;             % 峰值细化半径（样本）
+cfg.peakRefineEnable = true;            % 峰值优化
 % 预回声容忍度分级
-cfg.preEchoSevereThresh = 0.15; % 严重预回声阈值
-cfg.preEchoModerateThresh = 0.05; % 中等预回声阈值
+cfg.preEchoSevereThresh = 0.15;         % 严重预回声阈值
+cfg.preEchoModerateThresh = 0.05;       % 中等预回声阈值
 
 % 增加以下参数
 cfg.enableIRDiagnostic = true;  % 启用IR诊断数据保存
@@ -263,6 +263,18 @@ cfg.initialDelaySamples = round(0.0012 * cfg.fs);
 cfg.adaptiveDelayRequireHighSNR = false; 
 cfg.adaptiveDelayMinRefRms = 1e-6; 
 cfg.adaptiveDelayMinErrRms = 1e-6; 
+
+
+%% 新增配置（从validate_config整合）
+% 质量评估阈值
+cfg.maxPeakStd = 20;           % 峰值标准差阈值，20样本（约0.42ms @48kHz）
+
+% 预回声能量比例阈值
+% 良好的声学测量：预回声比例 < 0.05（5%）
+% 可接受的范围：预回声比例 < 0.15（15%）
+cfg.maxPreEchoRatio = 0.05;    
+cfg.minSimilarity = 0.8;       % IR相似度阈值，80%
+cfg.generateReport = false;     % 是否生成质量报告（默认关闭）
 
 %% 可选字段覆盖
 if mod(nargin,2)~=0
