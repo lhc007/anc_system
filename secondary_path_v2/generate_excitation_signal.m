@@ -1,31 +1,31 @@
 function [sweepCore_scaled, sweepSig, info] = generate_excitation_signal(cfg)
-% generate_excitation_signal - 生成激励信号（扫频信号）
-% 构建播放信号 [前静音][扫频][后静音]
-% 包含完整的ESS生成和信号构建流程
-
-fs = cfg.fs;
-
-% 生成原始ESS
-[sweepCore, ~, ~, info] = generate_ess_core(cfg);
-
-% 构建播放信号 [前静音][扫频][后静音]
-pre_silence_samples = round(cfg.padLeading * fs);
-post_silence_samples = round(cfg.padTrailing * fs);
-
-% 构建信号：[pre_silence][sweepCore][post_silence]
-sweepCore_scaled = sweepCore(:);
-if max(abs(sweepCore_scaled)) > 0
-    sweepCore_scaled = (sweepCore_scaled / max(abs(sweepCore_scaled))) * cfg.amplitude;
-end
-
-sweepSig = [ ...
-    zeros(pre_silence_samples, 1); ...
-    sweepCore_scaled; ...
-    zeros(post_silence_samples, 1) ...
-];
-
-% 确保列向量
-sweepSig = sweepSig(:);    % 播放信号
+    fs = cfg.fs;
+    
+    % 生成原始ESS
+    [sweepCore, ~, ~, info] = generate_ess_core(cfg);
+    
+    % 构建播放信号 [前静音][扫频][后静音]
+    pre_silence_samples = round(cfg.padLeading * fs);
+    post_silence_samples = round(cfg.padTrailing * fs);
+    
+    % 处理防削波 - 在生成阶段就确定
+    sweepCore_scaled = sweepCore(:);
+    max_amp = max(abs(sweepCore_scaled));
+    
+    if max_amp > 0
+        % 考虑扬声器最大幅度和安全裕度
+        target_amp = min(cfg.amplitude, 0.95); % 保留5%裕度
+        sweepCore_scaled = (sweepCore_scaled / max_amp) * target_amp;
+    end
+    
+    sweepSig = [ ...
+        zeros(pre_silence_samples, 1); ...
+        sweepCore_scaled; ...
+        zeros(post_silence_samples, 1) ...
+    ];
+    
+    % 确保列向量
+    sweepSig = sweepSig(:);
 end
 
 function [sweepCore, sweepFull, invFilter, info] = generate_ess_core(cfg)

@@ -1,102 +1,63 @@
 function result = deconv_industrial(recorded, sweep, cfg)
+% 反卷积：从录制信号中提取冲激响应（IR）
+% 修复点：正确计算FFT长度，避免时域混叠
+
     fs = cfg.fs;
     regEps = cfg.deconvRegEps;
     irMaxLen = cfg.irMaxLen;
     preDelayKeep = cfg.deconvPreDelayKeep;
 
-    % 确保列向量
     rec = recorded(:);
     exc = sweep(:);
-
-    % 截断到相同长度
     N = min(length(rec), length(exc));
     rec = rec(1:N);
     exc = exc(1:N);
 
-    fprintf('[DEBUG] deconv输入: rec=%d, exc=%d\n', N, N);
+    % =================== 修正：使用 N + irMaxLen - 1 作为线性卷积长度下限 ===================
+    Nfft = 2^nextpow2(N + irMaxLen - 1);  % ←←← 关键修复！
 
-    % =================== 频域反卷积 ===================
-    % 使用足够长的 FFT 避免混叠
-    Nfft = 2^nextpow2(N + irMaxLen - 1);  % 长度应 >= N + irMaxLen - 1
-
-    % 归一化激励信号
+    % 归一化激励
     exc_norm = exc / norm(exc);
-    EXC_norm = fft(exc_norm, Nfft);
+    EXC = fft(exc_norm, Nfft);
     REC = fft(rec, Nfft);
 
-    magEXC2 = abs(EXC_norm).^2;
-    noise_floor = median(abs(REC)) * 0.1;
-    regTerm = regEps * max(magEXC2) + noise_floor^2;
-
-    % 维纳滤波
-    Hf = (REC .* conj(EXC_norm)) ./ (magEXC2 + regTerm);
-
-    % IFFT 得到线性卷积结果
+    % 正则化维纳反卷积
+    magEXC2 = abs(EXC).^2;
+    noise_floor = median(abs(REC(1:round(N/10)))); % 前10%估计噪声
+    regTerm = regEps * max(magEXC2) + (noise_floor * 0.1)^2;
+    Hf = (REC .* conj(EXC)) ./ (magEXC2 + regTerm);
     h_full = real(ifft(Hf));
 
-    % 去直流
-    h_full = h_full - mean(h_full);
-
-    % =================== 寻找主峰 ===================
-    h_abs = abs(h_full);
-    search_start = round(0.1 * Nfft);
-    search_end = round(0.9 * Nfft);
-    [max_val, max_idx] = max(h_abs(search_start:search_end));
-    max_idx = max_idx + search_start - 1;
-
-    if max_val < 0.1 * max(h_abs)
-        max_idx = round(Nfft/2);
-    end
-
-    % =================== SNR计算 ===================
-    win_samples = round(0.0005 * fs);
-    sig_start = max(1, max_idx - win_samples);
-    sig_end = min(Nfft, max_idx + win_samples);
-
-    noise_start = 1;
-    noise_end = max(1, sig_start - 1);
-
-    signal_energy = sum(h_full(sig_start:sig_end).^2);
-    noise_energy = sum(h_full(noise_start:noise_end).^2);
-
-    if noise_end > noise_start
-        noise_energy = noise_energy * (sig_end-sig_start+1) / (noise_end-noise_start+1);
+    % 寻找主峰（限制在物理合理范围）
+    search_start = max(1, round(cfg.minPhysDelaySamples * 0.5));
+    search_end = min(length(h_full), round(cfg.maxPhysDelaySamples * 1.5));
+    if search_end > search_start
+        [~, max_idx] = max(abs(h_full(search_start:search_end)));
+        max_idx = max_idx + search_start - 1;
     else
-        noise_energy = 1e-6;
+        max_idx = round(length(h_full)/2);
     end
 
-    snr_db = 10*log10(signal_energy / noise_energy);
-
-    % =================== IR裁剪 ===================
+    % 裁剪IR（保留preDelayKeep个前置样本）
     ir_start = max(1, max_idx - preDelayKeep);
-    ir_end = min(Nfft, ir_start + irMaxLen - 1);
-    ir = h_full(ir_start:ir_end);
-
-    if length(ir) < irMaxLen
-        ir = [ir; zeros(irMaxLen - length(ir), 1)];
+    ir_end = ir_start + irMaxLen - 1;
+    if ir_end > length(h_full)
+        ir = [h_full(ir_start:end); zeros(irEnd - length(h_full), 1)];
+    else
+        ir = h_full(ir_start:ir_end);
     end
 
-    peak_pos = max_idx - ir_start + 1;
-    if peak_pos < 1
-        peak_pos = 1;
-    elseif peak_pos > irMaxLen
-        peak_pos = irMaxLen;
-    end
+    peakPos = max_idx - ir_start + 1; % IR内部峰值位置（从1开始）
 
-    % =================== 重建验证 ===================
-    reconstructed = conv(ir, exc, 'same');
-    recon_length = min(length(rec), length(reconstructed));
+    % SNR评估
+    win = max(1, round(0.001*fs));
+    sig_win = ir(max(1,peakPos-win):min(end,peakPos+win));
+    noise_win = ir(1:max(1,peakPos-win-1));
+    snr_db = 10*log10(sum(sig_win.^2)/(sum(noise_win.^2)+eps));
 
-    mse = mean((rec(1:recon_length) - reconstructed(1:recon_length)).^2);
-    recon_snr = 10*log10(sum(rec(1:recon_length).^2)/(mse*recon_length + 1e-12));
-
-    fprintf('[DEBUG] IR提取结果: 长度=%d, SNR=%.1f dB, 重建SNR=%.1f dB\n', ...
-        length(ir), snr_db, recon_snr);
-
+    % 返回结果（包含peakPos供后续使用）
     result = struct(...
         'ir', ir, ...
-        'peakPos', peak_pos, ...
-        'snr', snr_db, ...
-        'reconstructed', reconstructed(1:recon_length), ...
-        'reconSNR', recon_snr);
+        'peakPos', peakPos, ...
+        'snr', snr_db);
 end

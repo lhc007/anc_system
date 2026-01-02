@@ -206,7 +206,16 @@ metrics = struct(...
     'numMics', numMics, ...
     'numReps', numReps);
 
-% 输出详细质量报告
+
+%% 相干性低通常意味着：
+ 
+% 环境噪声大（风扇、空调、电脑底噪）
+% 非线性失真（扬声器过载、削波）
+% 系统不稳定（播放/录制不同步、缓冲区溢出）
+% 扫频激励能量不足（幅度过小，SNR 虽够但相干性仍低）
+% 反卷积或对齐有误差
+
+%% 输出详细质量报告
 fprintf('  质量评估结果:\n');
 fprintf('    - SNR: %.1f dB (阈值: %.1f dB) %s\n', ...
     medianSNR, snrThreshold, ternary(snrOK, '✓', '✗'));
