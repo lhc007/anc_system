@@ -93,26 +93,25 @@ cfg.enableHardwareCalibration = true;
 
 cfg.channel_out = 1;
 cfg.channel_in = 1;
-
-cfg.padLeading        = 0.8;      % % 扫频前导静音（秒）——包含硬件稳定时间 + ESS反卷积所需padding
-cfg.padTrailing       = 0.5;      % 扫频尾随静音时间（秒）
+cfg.applyNoiseGate = false;         % 轻微噪声抑制开关 抑制尾部噪声，减少预回声
+cfg.repetitions       = 3;          % 重复播放并录制次数；用于提高 SNR 和鲁棒性
+cfg.padLeading        = 0.8;        % 扫频前导静音（秒）——包含硬件稳定时间 + ESS反卷积所需padding
+cfg.padTrailing       = 0.5;        % 扫频尾随静音时间（秒）
 cfg.maxTotalDelaySec = 1.0;         % 最大物理延迟(秒)
 cfg.amplitude         = 0.95;       % 扫频信号幅值（接近满幅但避免削波）
 cfg.sweepDuration     = 5;          % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
 cfg.minSnrForReliable = 3; 
 cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
 cfg.sweepF1           = 50;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
-cfg.sweepF2           = 800;                  % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
-cfg.repetitions       = 1;                     % 重复播放并录制次数；用于提高 SNR 和鲁棒性
+cfg.sweepF2           = 800;                   % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
 cfg.irMaxLen          = 48000;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
 cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
-cfg.saveFirstRaw      = true;                 % 是否保存第一次原始录音（用于调试）
+cfg.saveFirstRaw      = true;                  % 是否保存第一次原始录音（用于调试）
 cfg.saveAllRaw        = true;                  % 是否保存所有重复的原始录音（占用磁盘空间）
 cfg.doAlignRepeats    = true;                  % 是否对多次重复测量进行时间对齐（false 保留真实延迟变化）
 cfg.exportAlignedIR   = true;                  % 是否导出对齐后的平均 IR（用于诊断）
-
 cfg.writeBlockPad     = false;                 % 是否在播放块前后填充静音（避免突发）
 
 % 峰与漂移相关参数

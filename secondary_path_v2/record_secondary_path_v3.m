@@ -1,10 +1,8 @@
 function record_secondary_path_v3()
 % record_secondary_path_v3.m 多通道管道ANC次级路径测量系统
-% 版本：v4.5（修复版）
-% sweepSig：完整 ESS 信号（含前后静音），用于播放和对齐。
-% sweepCore_scaled：仅核心扫频部分（无静音），用于反卷积。
+% 版本：v4.7（完全修复版）
 
-clear; clc;
+clc;
 
 %% ============== 配置加载与验证 ==============
 cfg = anc_config();
@@ -20,6 +18,9 @@ numErrMics = length(errMicIdx);
 fprintf('[init] 误差麦克风通道: %s\n', mat2str(errMicIdx));
 
 %% ============== 初始化系统 ==============
+% 全局硬件句柄（用于确保即使出错也能释放）
+global_hw = [];
+
 try
     %% ============== 生成激励信号 ==============
     fprintf('[signal] 生成ESS激励信号...\n');
@@ -39,8 +40,7 @@ try
     if length(sweepCore_scaled) ~= sweepCoreLen
         error('扫频核心长度不匹配！');
     end
-    fprintf('  [验证] sweepCore_scaled长度: %d (正确)\n', length(sweepCore_scaled));
-
+    
     %% ============== 容器初始化 ==============
     Lh = cfg.irMaxLen;
     impulseResponses = zeros(Lh, numErrMics, cfg.numSpeakers);
@@ -56,7 +56,11 @@ try
         'timestamp', datetime('now', 'TimeZone', 'local'));
     
     meta.perSpeaker = cell(cfg.numSpeakers, 1);
-
+    
+    %% ============== 生成静音信号用于硬件重置 ==============
+    silence_duration = 0.1;  % 100ms静音用于重置缓冲区
+    silence_signal = zeros(round(silence_duration * fs), 1);
+    
     %% ============== 主测量循环 ==============
     fprintf('\n[measure] 开始次级路径测量...\n');
     
@@ -65,84 +69,122 @@ try
         fprintf('[measure] 扬声器 %d/%d\n', spk, cfg.numSpeakers);
         fprintf('%s\n', repmat('=', 1, 60));
         
-        spkData = struct();
-        spkData.irRaw = cell(cfg.repetitions, 1);
-        spkData.irAligned = cell(cfg.repetitions, 1);
-        spkData.snrEst = zeros(cfg.repetitions, numErrMics);
-        spkData.peakPos = zeros(cfg.repetitions, numErrMics);
-        spkData.coherenceEst = zeros(cfg.repetitions, numErrMics);
-        spkData.irFinal = zeros(Lh, numErrMics, cfg.repetitions);
+        % ========== 硬件初始化（每个扬声器独立）==========
+        fprintf('[measure] 初始化硬件...\n');
+        hw = hardware_init_measure(cfg);
+        global_hw = hw;  % 保存到全局变量用于错误处理
         
-        % === 阶段1: 数据采集 ===
-        fprintf('[measure] 阶段1: 数据采集\n');
+        % ========== 准备激励信号 ==========
+        spkDriveSig = cfg.spkAmplitude(spk) * sweepSig(:);
+        maxVal = max(abs(spkDriveSig));
+        if maxVal > 0.95
+            scale = 0.9 / maxVal;
+            spkDriveSig = spkDriveSig * scale;
+            fprintf('  防削波缩放: %.2f\n', scale);
+        end
+        
+        % ========== 预播放静音，稳定硬件 ==========
+        fprintf('  预播放静音稳定硬件...\n');
+        [~, ~] = play_and_record(hw, silence_signal, spk, cfg);
+        
+        % ========== 数据采集容器 ==========
+        irFinal = zeros(Lh, numErrMics, cfg.repetitions);
+        snrEst = zeros(cfg.repetitions, numErrMics);
+        peakPos = zeros(cfg.repetitions, numErrMics);
+        coherenceEst = zeros(cfg.repetitions, numErrMics);
+        recordedRaw = cell(cfg.repetitions, 1);  % 存储原始录制数据用于调试
+        
+        fprintf('[measure] 阶段1: 数据采集 (%d次重复)\n', cfg.repetitions);
         
         for rep = 1:cfg.repetitions
             fprintf('  重复 %d/%d... ', rep, cfg.repetitions);
             
-            if rep == 1
-                hw = hardware_init_measure(cfg);
-                fprintf('硬件已初始化\n');
-            else
-                pause(0.5);
-                hw = hardware_init_measure(cfg);
+            % ========== 播放前静音重置缓冲区 ==========
+            if rep > 1
+                [~, ~] = play_and_record(hw, silence_signal, spk, cfg);
             end
             
-            spkDriveSig = cfg.spkAmplitude(spk) * sweepSig(:);
-            maxVal = max(abs(spkDriveSig));
-            if maxVal > 0.95
-                scale = 0.9 / maxVal;
-                spkDriveSig = spkDriveSig * scale;
-                fprintf('    防削波缩放: %.2f\n', scale);
-            end
-            
-            % [播放 & 录制]
+            % ========== 播放并录制主信号 ==========
             [recordedFull, ~] = play_and_record(hw, spkDriveSig, spk, cfg);
+            recordedRaw{rep} = recordedFull;  % 保存原始数据
             
-            % ✅ 修复1: 使用 recordedFull，不是 recorded_raw！
-            [~, recorded_aligned] = align_sweep_start(recordedFull, sweepSig, cfg, errMicIdx);
+            % ========== 对齐信号 ==========
+            [~, recorded_aligned] = align_sweep_start(...
+                recordedFull, sweepSig, cfg, errMicIdx);
             
-            spkData.irAligned{rep} = recorded_aligned;
-            hw.release();
-            fprintf('完成\n');
-        end
-
-        % === 阶段2: 反卷积 + 相干性计算（跳过冗余延迟估计）===
-        fprintf('[measure] 阶段2: 冲激响应提取与质量评估\n');
-        
-        for rep = 1:cfg.repetitions
-            fprintf('  处理重复 %d... ', rep);
+            % ========== 反卷积处理 ==========
             for m = 1:numErrMics
-                recSegment = spkData.irAligned{rep}(:, m);
+                recSegment = recorded_aligned(:, m);
                 
                 % 反卷积
                 irResult = deconv_industrial(recSegment, sweepCore_scaled, cfg);
                 
+                % 截取到指定长度
                 irLength = min(Lh, length(irResult.ir));
-                spkData.irFinal(1:irLength, m, rep) = irResult.ir(1:irLength);
-                spkData.snrEst(rep, m) = irResult.snr;
-                spkData.peakPos(rep, m) = irResult.peakPos;
+                irFinal(1:irLength, m, rep) = irResult.ir(1:irLength);
+                snrEst(rep, m) = irResult.snr;
+                peakPos(rep, m) = irResult.peakPos;
                 
-                % ✅ 修复2: 正确调用 compute_reconstruction_coherence
-                % 参数顺序: (recorded, ir, sweep_ref, peakPos, fs)
-                spkData.coherenceEst(rep, m) = compute_reconstruction_coherence(...
+                % 计算相干性
+                coherenceEst(rep, m) = compute_reconstruction_coherence(...
                     recSegment, irResult.ir, sweepCore_scaled, irResult.peakPos, fs);
             end
-            fprintf('完成\n');
+            
+            fprintf('完成 (SNR: %.1f dB, 延迟: %d)\n', ...
+                mean(snrEst(rep, :)),  round(median(peakPos(rep, :))));
+            
+            % ========== 重复间隔 ==========
+            if rep < cfg.repetitions
+                pause(cfg.repetitionInterval);
+            end
         end
-
-        % 质量评估
-        qualityMetrics = assess_ir_quality(spkData.irFinal, spkData.snrEst, ...
-            spkData.peakPos, spkData.coherenceEst, cfg);
+        
+        % ========== 硬件释放 ==========
+        if ~isempty(hw)
+            hw.release();
+            global_hw = [];
+        end
+        
+        % ========== 数据质量评估 ==========
+        fprintf('[measure] 阶段2: 质量评估\n');
+        qualityMetrics = assess_ir_quality(irFinal, snrEst, peakPos, coherenceEst, cfg);
         usable = qualityMetrics.usable;
         
-        % === 阶段3: 数据平均 ===
+        % ========== 延迟估计（统一策略）==========
+        % 使用所有麦克风和重复的中值峰值位置
+
+        % 传统写法：兼容所有MATLAB版本
+        % medianPeakPos = median(peakPos(:));
+
+        % 新语法：仅支持MATLAB R2018b及以上版本 新语法更灵活，可以指定维度
+        medianPeakPos = median(peakPos, 'all');  
+
+        % 物理延迟 = 峰值位置 + 硬件延迟修正 - 1
+        % （峰值位置是从1开始的索引，实际延迟是峰值位置-1）
+        if isfield(cfg, 'hardwareDelaySamples')
+            hardwareDelay = cfg.hardwareDelaySamples;
+        else
+            hardwareDelay = 0;  % 默认为0，需要校准
+        end
+        
+        delayEstimate = (medianPeakPos - 1) + hardwareDelay;
+        
+        % 确保延迟在合理范围内
+        delayEstimate = max(cfg.minPhysDelaySamples, ...
+            min(cfg.maxPhysDelaySamples, round(delayEstimate)));
+        
+        % ========== 数据处理 ==========
         if usable
-            fprintf('[measure] 阶段3: 数据平均\n');
-            irAligned = align_impulse_responses(spkData.irFinal, spkData.peakPos, cfg);
+            fprintf('[measure] 阶段3: 数据处理\n');
             
-            weights = mean(spkData.snrEst, 2);
+            % 对齐IR
+            irAligned = align_impulse_responses(irFinal, peakPos, cfg);
+            
+            % SNR加权平均
+            weights = mean(snrEst, 2);
             weights = weights - min(weights);
-            if sum(weights) > 0
+            
+            if sum(weights) > 0 && cfg.repetitions > 1
                 weights = weights / sum(weights);
                 irAvg = zeros(Lh, numErrMics);
                 for rep = 1:cfg.repetitions
@@ -152,30 +194,41 @@ try
                 irAvg = mean(irAligned, 3);
             end
             
+            % 后处理
             irAvg = postprocess_ir(irAvg, cfg);
             impulseResponses(:, :, spk) = irAvg;
             
-            fprintf('    平均完成，SNR: %.1f dB, 相干性: %.2f\n', ...
-                qualityMetrics.medianSNR, qualityMetrics.meanCoherence);
+            fprintf('  处理完成: SNR=%.1fdB, 相干性=%.2f, 延迟=%d样本\n', ...
+                qualityMetrics.medianSNR, qualityMetrics.meanCoherence, delayEstimate);
         else
             fprintf('[measure] 警告: 数据质量不足，使用零IR\n');
             impulseResponses(:, :, spk) = zeros(Lh, numErrMics);
         end
         
-        % ✅ 修复3: 使用 peakPos 计算真实物理延迟！
-        avgPeakPos = mean(spkData.peakPos(:));
-        delayEstimate = avgPeakPos - 1;  % ←←← 黄金标准！
+        % ========== 保存元数据 ==========
+        % 创建标量结构体
+        speakerMeta = struct();
         
-        meta.perSpeaker{spk} = struct(...
-            'delayEstimate', delayEstimate, ...   % ← 正确延迟
-            'qualityMetrics', qualityMetrics, ...
-            'usable', usable, ...
-            'snrEst', spkData.snrEst, ...
-            'peakPos', spkData.peakPos, ...
-            'coherenceEst', spkData.coherenceEst);
+        speakerMeta.delayEstimate = delayEstimate;
+        speakerMeta.medianPeakPos = medianPeakPos;
+        speakerMeta.hardwareDelay = hardwareDelay;
+        speakerMeta.qualityMetrics = qualityMetrics;
+        speakerMeta.usable = usable;
+        speakerMeta.snrEst = snrEst;
+        speakerMeta.peakPos = peakPos;
+        speakerMeta.coherenceEst = coherenceEst;
+        speakerMeta.rawRecordings = recordedRaw;  % cell array 是合法字段值！
         
-        fprintf('[measure] 扬声器 %d 完成: %s (延迟=%d样本)\n', ...
-            spk, ternary(usable, '可用', '不可用'), delayEstimate);
+        meta.perSpeaker{spk} = speakerMeta;  % 明确赋值为标量结构体
+
+        fprintf('[measure] 扬声器 %d 完成: %s\n', ...
+            spk, ternary(usable, '✅ 可用', '❌ 不可用'));
+        
+        % ========== 扬声器间暂停（避免串扰）==========
+        if spk < cfg.numSpeakers
+            fprintf('  扬声器间暂停 %.1f 秒...\n', cfg.repetitionInterval * 2);
+            pause(cfg.repetitionInterval * 2);
+        end
     end
     
     %% ============== 构建输出结构 ==============
@@ -186,22 +239,30 @@ try
     secondary.numMics = numErrMics;
     secondary.errorMicPhysicalChannels = errMicIdx;
     secondary.irLength = Lh;
-    secondary.description = 'Industrial-grade secondary path (v4.5 - 修复版)';
+    secondary.description = 'Industrial-grade secondary path (v4.7)';
     secondary.timestamp = datetime('now', 'TimeZone', 'local');
     
-    % ✅ 关键：使用基于 peakPos 的延迟
+    % 延迟向量
     delayVector = zeros(1, cfg.numSpeakers);
     for i = 1:cfg.numSpeakers
         if meta.perSpeaker{i}.usable
-            delayVector(i) = meta.perSpeaker{i}.delayEstimate;  % ← 正确值
+            delayVector(i) = meta.perSpeaker{i}.delayEstimate;
         else
             delayVector(i) = cfg.minPhysDelaySamples;
         end
     end
     secondary.delayEstimateSamples = delayVector;
     
+    % 可选：保存诊断信息
     if cfg.saveDiagnosticInfo
         secondary.meta = meta;
+        % 添加配置摘要（不保存可能包含敏感信息的完整配置）
+        secondary.configSummary = struct(...
+            'fs', cfg.fs, ...
+            'repetitions', cfg.repetitions, ...
+            'irMaxLen', cfg.irMaxLen, ...
+            'numSpeakers', cfg.numSpeakers, ...
+            'numErrorMics', numErrMics);
     end
     
     %% ============== 保存结果 ==============
@@ -209,6 +270,11 @@ try
     if ~exist(saveDir, 'dir')
         mkdir(saveDir);
     end
+    
+    % 添加版本信息
+    secondary.version = 'v4.7';
+    secondary.checksum = compute_data_checksum(impulseResponses);
+    
     save(cfg.secondaryPathFile, 'secondary', '-v7.3');
     fprintf('[output] 保存完成: %s\n', cfg.secondaryPathFile);
     
@@ -219,43 +285,100 @@ try
     fprintf('\n[success] 次级路径测量完成!\n');
     
 catch ME
-    fprintf('\n[ERROR] %s\n', ME.message);
+    % ========== 错误处理：确保硬件释放 ==========
+    if ~isempty(global_hw)
+        try
+            global_hw.release();
+        catch
+            fprintf('  警告: 硬件释放失败\n');
+        end
+        global_hw = [];
+    end
+    
+    fprintf('\n[ERROR] 测量失败: %s\n', ME.message);
+    fprintf('堆栈跟踪:\n');
+    for i = 1:min(5, length(ME.stack))  % 只显示前5个堆栈帧
+        fprintf('  %s (第%d行)\n', ME.stack(i).name, ME.stack(i).line);
+    end
+    
+    % 保存部分数据用于调试
+    try
+        errorData = struct(...
+            'errorMessage', ME.message, ...
+            'errorTime', datetime('now', 'TimeZone', 'local'), ...
+            'partialData', impulseResponses, ...
+            'lastSpeaker', spk);
+        
+        errorFile = sprintf('secondary_path_error_%s.mat', ...
+            datetime('now', 'Format', 'yyyyMMdd_HHmmss'));
+        save(errorFile, 'errorData', '-v7.3');
+        fprintf('[output] 错误数据已保存: %s\n', errorFile);
+    catch
+        fprintf('  无法保存错误数据\n');
+    end
+    
     rethrow(ME);
 end
 
 fprintf('\n[complete] 程序结束\n');
-end 
+end
 
 %% ========================================================================
-% 子函数（保持不变）
+% 修复的辅助函数
 % ========================================================================
 
 function cfg = validate_config(cfg)
 requiredFields = {'fs', 'numSpeakers', 'irMaxLen', 'minPhysDelaySamples', ...
-    'maxPhysDelaySamples', 'repetitions', 'snrThresholdDB'};
+    'maxPhysDelaySamples', 'repetitions', 'snrThresholdDB', 'micChannels'};
 for i = 1:length(requiredFields)
     if ~isfield(cfg, requiredFields{i})
         error('配置缺少必要字段: %s', requiredFields{i});
     end
 end
+
+% 自动补充缺失字段
+if ~isfield(cfg, 'hardwareDelaySamples')
+    cfg.hardwareDelaySamples = 0;  % 需要实际测量校准
+end
+
+if ~isfield(cfg, 'repetitionInterval')
+    cfg.repetitionInterval = 0.5;
+end
+
+if ~isfield(cfg, 'saveDiagnosticInfo')
+    cfg.saveDiagnosticInfo = false;
+end
+
+if ~isfield(cfg, 'generateReport')
+    cfg.generateReport = false;
+end
+
+% 验证值范围
 if cfg.minPhysDelaySamples < 1
     cfg.minPhysDelaySamples = 1;
 end
-if cfg.maxPhysDelaySamples < cfg.minPhysDelaySamples + 100
-    cfg.maxPhysDelaySamples = cfg.minPhysDelaySamples + 1000;
+
+if cfg.maxPhysDelaySamples < cfg.minPhysDelaySamples + 50
+    cfg.maxPhysDelaySamples = cfg.minPhysDelaySamples + 200;
 end
+
 if cfg.repetitions < 1
     cfg.repetitions = 1;
 end
+
 if ~isfield(cfg, 'deconvPreDelayKeep')
-    cfg.deconvPreDelayKeep = 64; % 默认保留64样本前置
+    cfg.deconvPreDelayKeep = 64;
+end
+
+% 验证麦克风通道
+if ~isfield(cfg.micChannels, 'error')
+    error('配置缺少误差麦克风通道设置');
 end
 end
 
-function str = ternary(condition, trueStr, falseStr)
-if condition
-    str = trueStr;
-else
-    str = falseStr;
-end
+function checksum = compute_data_checksum(data)
+% 计算数据校验和，用于验证数据完整性
+data_flat = data(:);
+checksum = sum(abs(data_flat(1:min(1000, length(data_flat)))));
+checksum = mod(checksum, 2^31);  % 避免溢出
 end
