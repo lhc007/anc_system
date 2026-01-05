@@ -52,7 +52,7 @@ cfg.numSpeakers      = 2;           % 当前激活的扬声器数量（最大支
 cfg.ancLowpassHz     = 1000;        % ANC 系统工作上限频率（高于此频段不进行降噪处理）
 
 %% ANC系统监控频段
-cfg.bandFreqLow      = 60;          % 用于计算降噪效果（如 dB 改善量）的频带下限（Hz）
+cfg.bandFreqLow      = 50;          % 用于计算降噪效果（如 dB 改善量）的频带下限（Hz）
 cfg.bandFreqHigh     = 800;         % 用于计算降噪效果的频带上限（Hz）；覆盖典型路噪主能量区
 
 %% 输出限幅与保护
@@ -91,21 +91,40 @@ cfg.enableAutoGainAdjustment =true; %SNR过低时给出增益调整建议
 cfg.enableHardwareCalibration = true;
 % sweepCfg参数（扫频信号生成）
 
+%% ========== 激励信号 ==========
+cfg.sweepDuration = 4;          % 扫频时长 (秒)
+cfg.padLeading = 1;             % ⬅️  扫频前导静音（秒）关键：1200 ms 前静音（防提前响应）
+cfg.padTrailing = 0.5;            % 扫频尾随静音时间（秒）
+cfg.amplitude = 0.9;              % 扫频信号幅值 防削波
+cfg.alignTolMs = 100;             % 对齐容差（毫秒）
+
+%% ========== IR 配置 ==========
+cfg.irMaxLen = 4096;              % 85 ms 足够（原8192过大，含噪声）
+cfg.preDelayKeep = 64;           % 仅用于质量评估窗口，不影响延迟估计
+cfg.deconvPreDelayKeep = 64;     % 必须与上面对齐！
+
+%% ========== 评估阈值 ==========
+cfg.maxPreEchoDB = -25;           % 允许前回声稍高（因 preDelayKeep=128）
+cfg.minMainEnergyRatio = 0.70;    % 主能量从 t0=129 开始
+cfg.snrThresholdDB = 12;          % Realtek 信噪比略低，放宽
+cfg.coherenceThreshold = 0.75;
+%% ========== 硬件延迟校准 ==========
+cfg.hardwareDelaySamples = 0;     % 初始为0，后续可标定
+
+cfg.sweepFreqStartHz = 50;          % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
+cfg.sweepFreqEndHz = 800;          % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
+
+% 需确保 click_offset_sec < padLeading
+cfg.click_offset_sec = 0.001;       % Click 提前扫频开始的时间（秒），建议 0.5~2 ms
+
 cfg.channel_out = 1;
 cfg.channel_in = 1;
 cfg.applyNoiseGate = false;         % 轻微噪声抑制开关 抑制尾部噪声，减少预回声
-cfg.repetitions       = 3;          % 重复播放并录制次数；用于提高 SNR 和鲁棒性
-cfg.padLeading        = 0.8;        % 扫频前导静音（秒）——包含硬件稳定时间 + ESS反卷积所需padding
-cfg.padTrailing       = 0.5;        % 扫频尾随静音时间（秒）
+cfg.repetitions       = 2;          % 重复播放并录制次数；用于提高 SNR 和鲁棒性
 cfg.maxTotalDelaySec = 1.0;         % 最大物理延迟(秒)
-cfg.amplitude         = 0.95;       % 扫频信号幅值（接近满幅但避免削波）
-cfg.sweepDuration     = 5;          % 扫频持续时间（秒）；越长频率分辨率越高，低频能量越强
 cfg.minSnrForReliable = 3; 
-cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）
-cfg.sweepF1           = 50;                    % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
-cfg.sweepF2           = 800;                   % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
+cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）          
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
-cfg.irMaxLen          = 48000;                 % 冲激响应最大截断长度（样本数，@48kHz ≈ 85 ms）
 cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
 cfg.saveFirstRaw      = true;                  % 是否保存第一次原始录音（用于调试）
@@ -124,11 +143,6 @@ cfg.enableRealTimeMonitor = true;
 % SNR 排除：尝试剔除低 SNR 重复
 cfg.excludeLowSNR         = true;              % 是否排除 SNR 低于阈值的重复测量
 
-% SNR阈值
-cfg.snrThresholdDB = 15;                       % SNR 可靠性阈值（dB）；低于此值视为不可用
-% 相干性阈值
-cfg.coherenceThreshold = 0.7; 
-
 % 可靠峰判定参数
 cfg.reliableMinRatio      = 0.30;              % 可靠重复占比阈值（如 4 次中有 ≥2 次可靠才接受）
 cfg.reliableMaxIQR        = 1200;              % 延迟估计的四分位距（IQR）上限（样本）；过大表示分散
@@ -139,7 +153,6 @@ cfg.outlierIQRMultiplier  = 1.2;               % IQR 倍数阈值；超出 [Q1 -
 % deconvolve_sweep 参数（反卷积扫频恢复 IR）
 cfg.deconvExtraTail       = cfg.irMaxLen + 3000; % 反卷积时额外补零长度（提升频率分辨率）
 cfg.prePeakKeep           = 256;                  % 主峰前保留的样本数（用于因果性检查）
-cfg.deconvPreDelayKeep    = 768;                 % 反卷积结果中强制保留的前导静音长度
 cfg.deconvMaxSearch       = 20000;                % 最大搜索延迟范围（样本）
 cfg.deconvRegEps          = 1e-6;                % Tikhonov 正则化参数；抑制噪声放大（值越大越平滑）
 cfg.deconvNoiseWin        = 800;                % 用于估计噪声功率的窗口长度（样本）

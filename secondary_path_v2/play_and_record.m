@@ -6,11 +6,18 @@ totalSamples = length(driveSig);
 blockSize = cfg.timeFrameSamples;
 numBlocks = ceil(totalSamples / blockSize);
 
-% 初始化录音buffer
-recorded = zeros(numBlocks * blockSize, cfg.micNumChannels);
+totalSamples = length(driveSig);
+redundancy = round(1.5 * cfg.fs);
+recorded = zeros(numBlocks * blockSize + redundancy, cfg.micNumChannels);
 
 % 预热帧
 for i = 1:cfg.preRollFrames
+    hw.writer(zeros(blockSize, cfg.numSpeakers));
+    hw.reader();
+end
+
+% === 新增：额外静音，确保 Click 前是干净的 ===
+for i = 1:2
     hw.writer(zeros(blockSize, cfg.numSpeakers));
     hw.reader();
 end
@@ -53,18 +60,16 @@ for b = 1:numBlocks
 end
 
 % 截断到正确长度
-if size(recorded, 1) > totalSamples
-    recorded = recorded(1:totalSamples, :);
-elseif size(recorded, 1) < totalSamples
-    recorded(end+1:totalSamples, :) = 0;
+actualRecordedLength = recPtr - 1; % 已写入的样本数
+if actualRecordedLength < size(recorded, 1)
+    recorded = recorded(1:actualRecordedLength, :); % 只裁掉未使用的尾部零
 end
 
-% 返回信息结构
+% 返回实际录制长度
 info = struct(...
-    'totalSamples', totalSamples, ...
-    'actualSamples', size(recorded, 1), ...
+    'totalSamplesPlayed', totalSamples, ...
+    'actualSamplesRecorded', size(recorded, 1), ...
     'blocksPlayed', numBlocks);
-
 end
 
 

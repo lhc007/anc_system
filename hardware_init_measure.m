@@ -21,7 +21,7 @@ end
 % === 扬声器写入器 ===
 try
     w = audioDeviceWriter(...
-        'Device', cfg.spkDevice2Name, ...
+        'Device', cfg.spkDevice1Name, ...
         'SampleRate', cfg.fs, ...
         'ChannelMappingSource', 'Property', ...
         'ChannelMapping', [1, 2]);
@@ -37,7 +37,7 @@ hw.release = @() releaseAll(rdr, w);
 
 fprintf('[hardware-measure] 设备初始化完成:\n');
 fprintf('  麦克风: %s\n', cfg.micDeviceName);
-fprintf('  扬声器: %s\n', cfg.spkDevice2Name);
+fprintf('  扬声器: %s\n', cfg.spkDevice1Name);
 end
 
 % --- 辅助函数 ---

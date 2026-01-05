@@ -1,14 +1,20 @@
 function metrics = assess_ir_quality(irData, snrData, peakPosData, coherenceEst, cfg)
-% IR质量评估
-% 计算多种质量指标
+% assess_ir_quality - 脉冲响应（IR）质量综合评估
+%
 % 输入:
-%   irData: [numSamples, numMics, numReps] 脉冲响应数据
-%   snrData: [numReps, numMics] SNR估计值
-%   peakPosData: [numReps, numMics] 峰值位置
-%   coherenceEst: [numReps, numMics] 相干性估计值
-%   cfg: 配置结构体
+%   irData        : [numSamples, numMics, numReps] 脉冲响应数据
+%   snrData       : [numReps, numMics] 每次重复、每个麦克风的 SNR (dB)
+%   peakPosData   : [numReps, numMics] 峰值位置（MATLAB 1-based 索引）
+%   coherenceEst  : [numReps, numMics] 相干性估计值（0~1）
+%   cfg           : 配置结构体（需包含 fs 等字段）
+%
 % 输出:
-%   metrics: 质量指标结构体
+%   metrics       : 结构体，包含所有质量指标和可用于延迟估计的位置信息
+%
+% 注意:
+%   - 峰值位置 peakPosData 必须是 1-based（MATLAB 默认）
+%   - 延迟估计建议：delaySamples = (medianPeakPosPerMic - 1) - hardwareDelayCalibrated
+%   - hardwareDelayCalibrated 应通过 loopback 校准获得（单位：samples）
 
 fprintf('[assess_ir_quality] 开始IR质量评估\n');
 fprintf('  数据维度: %d样本 × %d麦克风 × %d重复\n', ...
@@ -26,7 +32,17 @@ coherenceMatrix = coherenceEst;
 % 中值SNR
 medianSNR = median(snrMatrix(:));
 
-% 峰值位置稳定性
+% ===== 新增：每通道中值峰值位置（1-based index）=====
+if numMics > 0 && ~isempty(peakPosMatrix)
+    medianPeakPosPerMic = zeros(numMics, 1);
+    for m = 1:numMics
+        medianPeakPosPerMic(m) = median(peakPosMatrix(:, m));
+    end
+else
+    medianPeakPosPerMic = zeros(numMics, 1);
+end
+
+% 峰值位置稳定性（全局）
 if numReps > 1 && numMics > 1
     peakStd = std(peakPosMatrix(:));
     peakRange = max(peakPosMatrix(:)) - min(peakPosMatrix(:));
@@ -42,113 +58,113 @@ else
     stability = 0.95; % 单次测量，假设稳定性较高但不完美
 end
 
-% ==================== 改进：IR相似度（重复间一致性）====================
-% 使用归一化互相关（NCC）的最大值作为相似度指标
+% ==================== IR相似度分析（逐麦克风）====================
 if numReps > 1
-    similarityMatrix = zeros(numReps, numReps);
-    similarityAtZeroLag = zeros(numReps, numReps); 
-    validPairs = 0;
-    
-    for i = 1:numReps
-        for j = i+1:numReps
-            % 对所有麦克风取平均，得到单通道代表IR
-            ir1 = mean(squeeze(irData(:, :, i)), 2);  % [N x 1]
-            ir2 = mean(squeeze(irData(:, :, j)), 2);  % [N x 1]
-            
-            % 确保长度一致（安全处理）
-            minLen = min(length(ir1), length(ir2));
-            ir1 = ir1(1:minLen);
-            ir2 = ir2(1:minLen);
-            
-            % 计算归一化互相关 (Normalized Cross-Correlation)
-            [xc, lags] = xcorr(ir1, ir2, 'coeff');
-            
-            % 找到最大互相关值（即最佳对齐下的相似度）
-            [maxCorr, ~] = max(xc);
+    minSimilarity = getCfgField(cfg, 'minSimilarity', 0.8);
 
-            % 获取零延迟处的互相关（检查时间对齐）- 更高效的方法
-            zeroLagIdx = round(length(xc)/2) + 1;  % xcorr输出的中间位置是零延迟
-            if zeroLagIdx <= length(xc)
-                zeroLagCorr = xc(zeroLagIdx);
-            else
-                zeroLagCorr = 0;
-            end
-            
-            % 存储相似度
-            similarityMatrix(i, j) = maxCorr;
-            similarityAtZeroLag(i, j) = zeroLagCorr;
-            validPairs = validPairs + 1;
-        end
-    end
+    % 预分配
+    nPairsPerMic = nchoosek(numReps, 2);
+    totalPairs = numMics * nPairsPerMic;
+    allMaxCorrs = zeros(totalPairs, 1);
+    allZeroLagCorrs = zeros(totalPairs, 1);
+    micAvgSim = zeros(numMics, 1);
+    corrCache = zeros(numMics, numReps, numReps); % 上三角缓存
     
-    if validPairs > 0
-        avgSimilarity = sum(similarityMatrix(:)) / validPairs;
-        avgZeroLagSimilarity = sum(similarityAtZeroLag(:)) / validPairs;
+    idx = 1;
+    for m = 1:numMics
+        totalMaxCorr = 0;
+        pairCount = 0;
         
-        % 警告：如果最佳对齐相似度远高于零延迟相似度，说明存在时间偏移
-        if (avgSimilarity - avgZeroLagSimilarity) > 0.2
-            fprintf('  警告: 测量间存在明显时间偏移(%.3f vs %.3f)\n', ...
-                avgSimilarity, avgZeroLagSimilarity);
+        for i = 1:numReps
+            for j = i+1:numReps
+                ir1 = squeeze(irData(:, m, i));
+                ir2 = squeeze(irData(:, m, j));
+                
+                [xc, ~] = xcorr(ir1, ir2, 'coeff');
+                [maxCorr, ~] = max(xc);
+                
+                % 零延迟索引（MATLAB xcorr 输出长度 = 2*N-1，中心在 N）
+                zeroLagIdx = floor(length(xc)/2) + 1;
+                if zeroLagIdx <= length(xc)
+                    zeroLagCorr = xc(zeroLagIdx);
+                else
+                    zeroLagCorr = 0;
+                end
+                
+                allMaxCorrs(idx) = maxCorr;
+                allZeroLagCorrs(idx) = zeroLagCorr;
+                corrCache(m, i, j) = maxCorr;
+                
+                totalMaxCorr = totalMaxCorr + maxCorr;
+                pairCount = pairCount + 1;
+                idx = idx + 1;
+            end
         end
-    else
-        avgSimilarity = 0;
-        avgZeroLagSimilarity = 0;
+        
+        micAvgSim(m) = (pairCount > 0) ? totalMaxCorr / pairCount : 1;
     end
-
-    % ==================== 检查极性一致性 ====================
-    % 排除对角线元素，只检查下三角
-    mask = tril(true(size(similarityMatrix)), -1);
-    similarityValues = similarityMatrix(mask);
-    polarityIssues = sum(similarityValues < -0.3); % -0.3阈值更敏感
     
+    avgSimilarity = mean(allMaxCorrs);
+    avgZeroLagSimilarity = mean(allZeroLagCorrs);
+    
+    % 问题麦克风检测
+    problematicMics = find(micAvgSim < (minSimilarity - 0.1));
+    if ~isempty(problematicMics)
+        fprintf('  警告: 麦克风 %s 相似度偏低 (<%.2f)，可能存在故障\n', ...
+            mat2str(problematicMics'), minSimilarity - 0.1);
+    end
+    
+    % 极性检查
+    polarityIssues = sum(allMaxCorrs < -0.3);
     if polarityIssues > 0
         fprintf('  警告: 检测到%d个极性可能反转的测量对（相似度<%.1f）\n', ...
             polarityIssues, -0.3);
     end
     
-    % 对称化矩阵以便存储
-    similarityMatrix = similarityMatrix + similarityMatrix';
-    for k = 1:numReps
-        similarityMatrix(k, k) = 1;
+    % 构建全局相似度矩阵
+    similarityMatrix = zeros(numReps, numReps);
+    for i = 1:numReps
+        for j = i+1:numReps
+            corrVals = corrCache(:, i, j);
+            validCorr = corrVals(corrVals ~= 0);
+            if ~isempty(validCorr)
+                similarityMatrix(i, j) = mean(validCorr);
+            else
+                similarityMatrix(i, j) = 0;
+            end
+        end
     end
+    similarityMatrix = similarityMatrix + similarityMatrix';
+    similarityMatrix(1:numReps+1:end) = 1; % 对角线设为1
+
 else
-    avgSimilarity = 1;  % 单次测量，相似度为1
+    minSimilarity = getCfgField(cfg, 'minSimilarity', 0.8);
+    avgSimilarity = 1;
     avgZeroLagSimilarity = 1;
-    similarityMatrix = 1;  % 1x1矩阵
+    similarityMatrix = 1;
+    micAvgSim = ones(numMics, 1);
 end
-% ==================== 相似度计算结束 ====================
+% ==================== 相似度分析结束 ====================
 
-% 能量分布
+% 能量分布分析
 irAvg = mean(irData, 3);
-totalEnergy = sum(irAvg(:).^2);
+totalEnergy = sum(irAvg(:).^2) + eps;
 
-% 前10%样本的能量占比（检查预回声）
+% 前10%样本能量（预回声）
 preSamples = max(1, floor(numSamples * 0.1));
 preEnergy = sum(sum(irAvg(1:preSamples,:).^2));
-preEnergyRatio = preEnergy / (totalEnergy + 1e-12);
+preEnergyRatio = preEnergy / totalEnergy;
 
-% 主能量窗口（找到峰值窗口）
-if numMics > 0
-    % 找到所有IR的最大绝对值位置
-    maxPos = zeros(numMics, 1);
-    
-    for m = 1:numMics
-        ir_mic = mean(irData(:, m, :), 3);
-        [~, maxPos(m)] = max(abs(ir_mic));
-    end
-    
-    % 主能量窗口（峰值周围±50个样本）
-    mainEnergy = 0;
-    for m = 1:numMics
-        startIdx = max(1, maxPos(m) - 50);
-        endIdx = min(numSamples, maxPos(m) + 50);
-        mainEnergy = mainEnergy + sum(irAvg(startIdx:endIdx, m).^2);
-    end
-    
-    mainEnergyRatio = mainEnergy / (totalEnergy + 1e-12);
-else
-    mainEnergyRatio = 0;
+% 主能量窗口（±50 样本）
+mainEnergy = 0;
+for m = 1:numMics
+    ir_mic = irAvg(:, m);
+    [~, maxIdx] = max(abs(ir_mic));
+    startIdx = max(1, maxIdx - 50);
+    endIdx = min(numSamples, maxIdx + 50);
+    mainEnergy = mainEnergy + sum(ir_mic(startIdx:endIdx).^2);
 end
+mainEnergyRatio = mainEnergy / totalEnergy;
 
 % 相干性统计
 if ~isempty(coherenceMatrix) && any(coherenceMatrix(:) > 0)
@@ -156,7 +172,6 @@ if ~isempty(coherenceMatrix) && any(coherenceMatrix(:) > 0)
     medianCoherence = median(coherenceMatrix(:));
     minCoherence = min(coherenceMatrix(:));
     
-    % 检查相干性是否异常高（接近1.0）
     if medianCoherence > 0.99
         fprintf('  警告: 相干性异常高(%.3f)，可能存在计算错误\n', medianCoherence);
     elseif medianCoherence < 0.3
@@ -168,44 +183,15 @@ else
     minCoherence = 0;
 end
 
-% 可用性判定
-% 从cfg获取阈值，如果不存在则使用默认值
-if isfield(cfg, 'snrThresholdDB')
-    snrThreshold = cfg.snrThresholdDB;
-else
-    snrThreshold = 15; % 默认15dB
-end
+% 可用性判定阈值
+snrThreshold = getCfgField(cfg, 'snrThresholdDB', 15);
+coherenceThreshold = getCfgField(cfg, 'coherenceThreshold', 0.7);
+maxPeakStd = getCfgField(cfg, 'maxPeakStd', 20);
+maxPreEchoRatio = getCfgField(cfg, 'maxPreEchoRatio', 0.2);
 
-if isfield(cfg, 'coherenceThreshold')
-    coherenceThreshold = cfg.coherenceThreshold;
-else
-    coherenceThreshold = 0.7; % 默认0.7
-end
-
-if isfield(cfg, 'maxPeakStd')
-    maxPeakStd = cfg.maxPeakStd;
-else
-    maxPeakStd = 20; % 默认20样本
-end
-
-if isfield(cfg, 'minSimilarity')
-    minSimilarity = cfg.minSimilarity;
-else
-    minSimilarity = 0.8; % 默认0.8
-end
-
-if isfield(cfg, 'maxPreEchoRatio')
-    maxPreEchoRatio = cfg.maxPreEchoRatio;
-else
-    maxPreEchoRatio = 0.2; % 预回声能量占比小于20%
-end
-
-% 处理单次测量时的特殊情况
+% 处理单次测量
 if numReps == 1
-    % 单次测量时，相似度阈值应该更宽松
-    minSimilarity = 0.5;
-    % 峰值稳定性不适用于单次测量
-    stablePeaks = true;  % 设为true，因为无法评估
+    stablePeaks = true;
 else
     stablePeaks = (peakStd < maxPeakStd);
 end
@@ -215,62 +201,49 @@ lowPreEcho = (preEnergyRatio < maxPreEchoRatio);
 consistent = (avgSimilarity > minSimilarity);
 coherenceOK = (medianCoherence > coherenceThreshold);
 
-% ==================== 改进：更精细的可用性判定 ====================
-% 根据重复次数调整权重
+% 综合评分
 if numReps > 1
-    % 多次测量：为不同指标分配权重
-    weights = struct(...
-        'snr', 0.3, ...
-        'coherence', 0.3, ...
-        'similarity', 0.2, ...
-        'stability', 0.1, ...
-        'preEcho', 0.1);
-    
-    score = 0;
-    score = score + weights.snr * double(snrOK);
-    score = score + weights.coherence * double(coherenceOK);
-    score = score + weights.similarity * double(consistent);
-    score = score + weights.stability * double(stablePeaks);
-    score = score + weights.preEcho * double(lowPreEcho);
-    
-    % 阈值可以根据实际应用调整
-    if score >= 0.7 && snrOK && coherenceOK
-        usable = true;
-    else
-        usable = false;
-    end
+    weights = struct('snr', 0.3, 'coherence', 0.3, 'similarity', 0.2, ...
+                     'stability', 0.1, 'preEcho', 0.1);
+    score = weights.snr * double(snrOK) + ...
+            weights.coherence * double(coherenceOK) + ...
+            weights.similarity * double(consistent) + ...
+            weights.stability * double(stablePeaks) + ...
+            weights.preEcho * double(lowPreEcho);
+    usable = (score >= 0.7) && snrOK && coherenceOK;
 else
-    % 单次测量：更严格的要求
-    usable = snrOK && coherenceOK && (preEnergyRatio < 0.1); % 单次时要求更低的预回声
-    score = double(usable);  % 单次测量时质量分数就是0或1
+    usable = snrOK && coherenceOK && (preEnergyRatio < 0.1);
+    score = double(usable);
 end
 
-% ==================== 构建输出结构（扩展）====================
+% ==================== 输出结构 ====================
 metrics = struct(...
-    'medianSNR', medianSNR, ...
-    'peakStd', peakStd, ...
-    'peakRange', peakRange, ...
-    'stability', stability, ...
-    'similarity', avgSimilarity, ...
-    'zeroLagSimilarity', avgZeroLagSimilarity, ... % 新增
-    'preEnergyRatio', preEnergyRatio, ...
-    'mainEnergyRatio', mainEnergyRatio, ...
-    'meanCoherence', meanCoherence, ...
-    'medianCoherence', medianCoherence, ...
-    'minCoherence', minCoherence, ...
-    'snrOK', snrOK, ...
-    'stablePeaks', stablePeaks, ...
-    'lowPreEcho', lowPreEcho, ...
-    'consistent', consistent, ...
-    'coherenceOK', coherenceOK, ...
-    'usable', usable, ...
-    'qualityScore', score, ... % 新增：量化质量分数
-    'numSamples', numSamples, ...
-    'numMics', numMics, ...
-    'numReps', numReps, ...
-    'similarityMatrix', similarityMatrix); % 新增：完整的相似度矩阵
+    'medianSNR',             medianSNR, ...
+    'peakStd',               peakStd, ...
+    'peakRange',             peakRange, ...
+    'stability',             stability, ...
+    'similarity',            avgSimilarity, ...
+    'zeroLagSimilarity',     avgZeroLagSimilarity, ...
+    'preEnergyRatio',        preEnergyRatio, ...
+    'mainEnergyRatio',       mainEnergyRatio, ...
+    'meanCoherence',         meanCoherence, ...
+    'medianCoherence',       medianCoherence, ...
+    'minCoherence',          minCoherence, ...
+    'snrOK',                 snrOK, ...
+    'stablePeaks',           stablePeaks, ...
+    'lowPreEcho',            lowPreEcho, ...
+    'consistent',            consistent, ...
+    'coherenceOK',           coherenceOK, ...
+    'usable',                usable, ...
+    'qualityScore',          score, ...
+    'numSamples',            numSamples, ...
+    'numMics',               numMics, ...
+    'numReps',               numReps, ...
+    'similarityMatrix',      similarityMatrix, ...
+    'micAvgSimilarity',      micAvgSim, ...
+    'medianPeakPosPerMic',   medianPeakPosPerMic);  % ✅ 关键新增：用于延迟估计
 
-% ==================== 改进输出报告 ====================
+% ==================== 报告输出 ====================
 fprintf('\n  ===== IR质量评估报告 =====\n');
 fprintf('  1. 基本参数:\n');
 fprintf('     样本数: %d, 麦克风: %d, 重复: %d\n', numSamples, numMics, numReps);
@@ -292,12 +265,20 @@ end
 fprintf('     • 能量分布: 主能量=%.1f%%, 预回声=%.1f%% %s\n', ...
     mainEnergyRatio*100, preEnergyRatio*100, ternary(lowPreEcho, '(合格)', '(不合格)'));
 
-fprintf('  3. 综合评估:\n');
+fprintf('  3. 延迟相关信息:\n');
+if numMics <= 5
+    fprintf('     • 各通道中值峰值位置（1-based）: %s\n', mat2str(medianPeakPosPerMic'));
+else
+    fprintf('     • 各通道中值峰值位置（1-based）: [省略，共%d通道]\n', numMics);
+end
+fprintf('       → 物理延迟（样本）≈ (位置 - 1) - hardwareDelayCalibrated\n');
+
+fprintf('  4. 综合评估:\n');
 fprintf('     质量分数: %.2f/1.0\n', score);
 fprintf('     判定结果: %s\n\n', ternary(usable, '✅ 测量质量合格', '❌ 测量质量不合格'));
 
 if ~usable
-    fprintf('  4. 改进建议:\n');
+    fprintf('  5. 改进建议:\n');
     if ~snrOK
         fprintf('     • 提高信噪比: 增大激励信号幅度或降低环境噪声\n');
     end
@@ -314,4 +295,14 @@ if ~usable
         fprintf('     • 减少预回声: 检查系统延迟，优化反卷积算法\n');
     end
 end
+
+end
+
+% 辅助函数：安全获取配置字段
+function val = getCfgField(cfg, field, default)
+    if isfield(cfg, field)
+        val = cfg.(field);
+    else
+        val = default;
+    end
 end
