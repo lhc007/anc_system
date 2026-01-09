@@ -112,42 +112,39 @@ try
             recordedRaw{rep} = recordedFull;  % 保存原始数据
             
             % ========== 对齐信号 ==========
-            [~, recorded_aligned] = align_sweep_start(...
-                recordedFull, exciteInfo, errMicIdx);
-            figure;
-            subplot(2,1,1);
-            plot(recorded_aligned(:,1));
-            title('对齐后的录制信号（通道1）');
-            xlabel('样本'); ylabel('幅度');
-            
-            subplot(2,1,2);
-            N = length(recorded_aligned(:,1));
-            f = (0:N-1)*(fs/N);
-            Y = fft(recorded_aligned(:,1));
-            semilogx(f(1:N/2), 20*log10(abs(Y(1:N/2))));
-            title('频谱（应看到 100–4000 Hz 扫频能量）');
-            xlabel('频率 (Hz)'); ylabel('幅度 (dB)');
-            grid on;
+            [actual_start_idx, recorded_aligned, clickAbsPos] = align_sweep_start(recordedFull, exciteInfo, errMicIdx);
+           
+            % figure;
+            % subplot(2,1,1);
+            % plot(recorded_aligned(:,1));
+            % title('对齐后的录制信号（通道1）');
+            % xlabel('样本'); ylabel('幅度');
+            % 
+            % subplot(2,1,2);
+            % N = length(recorded_aligned(:,1));
+            % f = (0:N-1)*(fs/N);
+            % Y = fft(recorded_aligned(:,1));
+            % semilogx(f(1:N/2), 20*log10(abs(Y(1:N/2))));
+            % title('频谱（应看到 100–4000 Hz 扫频能量）');
+            % xlabel('频率 (Hz)'); ylabel('幅度 (dB)');
+            % grid on;
             % ========== 反卷积处理 ==========
             for m = 1:numErrMics
                 recSegment = recorded_aligned(:, m);
                 
                 % 反卷积
-                irResult = deconv_ess(recSegment, invFilter, cfg);  % ← 改用新函数
+                irResult = deconv_ess(recSegment, invFilter, cfg, clickAbsPos, exciteInfo.coreLength);
 
-                % 截取到指定长度
+                 % 截取到指定长度
                 irLength = min(Lh, length(irResult.ir));
                 irFinal(1:irLength, m, rep) = irResult.ir(1:irLength);
                 snrEst(rep, m) = irResult.snr;
-                peakPos(rep, m) = irResult.peakPos;
+                peakPos(rep, m) = irResult.peakInSegment;  % 应为常数（如 128）
                 
                 % 计算相干性     
-               
-                % 正确调用：IR, 加权扫频, 录制段
-                % 不再从 sweepSig 中提取！直接使用预先生成的加权扫频核心
                 coherenceEst(rep, m) = compute_reconstruction_coherence(...
                     irResult.ir, ...
-                    weightedSweepForCoherence, ...   % ←←← 关键：使用这个变量
+                    weightedSweepForCoherence, ...
                     recSegment);
             end
             fprintf('完成 (SNR: %.1f dB, 延迟: %d)\n', ...
@@ -190,11 +187,11 @@ try
         
         %% =================================
         % 校准值（通过 loopback 实验测得）
-        hardwareDelayCalibrated = 120;  % 单位：samples
-        
+         hardwareDelayCalibrated = 120;  % 单位：samples
+         
         % 计算物理延迟（去除系统固有延迟）
         delaySamples = (metrics.medianPeakPosPerMic - 1) - hardwareDelayCalibrated;
-        delaySeconds = delaySamples / cfg.fs;
+         delaySeconds = delaySamples / cfg.fs;
         
         fprintf('各通道物理延迟（秒）: %s\n', mat2str(delaySeconds'));
         %% =================================

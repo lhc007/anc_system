@@ -100,8 +100,13 @@ if numReps > 1
                 idx = idx + 1;
             end
         end
-        
-        micAvgSim(m) = (pairCount > 0) ? totalMaxCorr / pairCount : 1;
+
+        if pairCount > 0
+            micAvgSim(m) =totalMaxCorr / pairCount;
+        else
+            micAvgSim(m) = 1;
+        end
+
     end
     
     avgSimilarity = mean(allMaxCorrs);

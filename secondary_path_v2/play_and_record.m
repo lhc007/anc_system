@@ -16,7 +16,7 @@ for i = 1:cfg.preRollFrames
     hw.reader();
 end
 
-% === 新增：额外静音，确保 Click 前是干净的 ===
+% === 新增：额外静音， ===
 for i = 1:2
     hw.writer(zeros(blockSize, cfg.numSpeakers));
     hw.reader();

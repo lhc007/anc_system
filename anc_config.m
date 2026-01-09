@@ -7,7 +7,6 @@ function cfg = anc_config(varargin)
 %   两端开口，主要控制低频路噪（胎噪、发动机低阶、风噪低频部分）。
 %
 % 重要字段说明：
-%   fs                 采样率 
 %   frameSize          每帧处理样本数 
 %   timeFilterLen 控制滤波器长度（FXLMS 自适应 FIR 长度） 
 %   secondaryPathFile  次级路径文件（录制脚本生成）
@@ -50,13 +49,13 @@ cfg.frameSize        = 128;         % 每帧处理的样本数；影响算法延
 cfg.timeFilterLen    = 3072;        % FXLMS 自适应滤波器的抽头数（FIR 长度）；需覆盖次级路径主能量持续时间
 cfg.numSpeakers      = 2;           % 当前激活的扬声器数量（最大支持 4，先用 2 个测试）
 cfg.ancLowpassHz     = 1000;        % ANC 系统工作上限频率（高于此频段不进行降噪处理）
+cfg.alignOffsetSamples = 64;      % 全局对齐补偿（样本），可在观察 bestLag 后设置为 64
+cfg.deconvReg = 1e-4;            % 频域去卷积正则化项（Wiener）
+cfg.minValidSNR = 6;            % 如果 rep 的 SNR < minValidSNR，则认为该 rep 无效（dB）
 
 %% ANC系统监控频段
 cfg.bandFreqLow      = 50;          % 用于计算降噪效果（如 dB 改善量）的频带下限（Hz）
 cfg.bandFreqHigh     = 800;         % 用于计算降噪效果的频带上限（Hz）；覆盖典型路噪主能量区
-
-%% 输出限幅与保护
-cfg.maxOutput        = 0.3;         % 扬声器输出信号的最大幅值（防止削波或硬件过载，0.3 ≈ -10.5 dBFS）
 
 % 硬件设备
 cfg.micDeviceName    = '六通道麦克风阵列 (YDM6MIC Audio)';  % 多通道麦克风设备名称（Windows 音频设备）
@@ -93,15 +92,21 @@ cfg.enableHardwareCalibration = true;
 
 %% ========== 激励信号 ==========
 cfg.sweepDuration = 4;          % 扫频时长 (秒)
-cfg.padLeading = 1;             % ⬅️  扫频前导静音（秒）关键：1200 ms 前静音（防提前响应）
-cfg.padTrailing = 0.5;            % 扫频尾随静音时间（秒）
+cfg.padLeading = 0.5;             % ⬅️  扫频前导静音（秒）关键：1200 ms 前静音（防提前响应）
+cfg.padTrailing = 1.0;            % 扫频尾随静音时间（秒）
 cfg.amplitude = 0.9;              % 扫频信号幅值 防削波
 cfg.alignTolMs = 100;             % 对齐容差（毫秒）
 
+%% ========== 次级路径测量专用 ==========
+cfg.sweepMaxAmp      = 0.9;   % 扫频最大幅度（用于 safe_normalize 的 maxAmp）
+cfg.sweepMinAmp      = 0.3;   % 扫频最小幅度（防弱激励
+
+cfg.repPauseSec       = 0.5;    % 同一扬声器重复测量之间的暂停（秒）
+cfg.spkSwitchPauseSec = 1.0;    % 切换扬声器之间的暂停（秒）
 %% ========== IR 配置 ==========
-cfg.irMaxLen = 4096;              % 85 ms 足够（原8192过大，含噪声）
-cfg.preDelayKeep = 64;           % 仅用于质量评估窗口，不影响延迟估计
-cfg.deconvPreDelayKeep = 64;     % 必须与上面对齐！
+cfg.irMaxLen = 2048;              % 85 ms 足够（原8192过大，含噪声）
+cfg.preDelayKeep = 1024;           % 仅用于质量评估窗口，不影响延迟估计
+cfg.deconvPreDelayKeep = 128;      % 主峰前保留样本数（确保因果）
 
 %% ========== 评估阈值 ==========
 cfg.maxPreEchoDB = -25;           % 允许前回声稍高（因 preDelayKeep=128）
@@ -114,9 +119,6 @@ cfg.hardwareDelaySamples = 0;     % 初始为0，后续可标定
 cfg.sweepFreqStartHz = 50;          % 扫频信号起始频率（Hz）；避开无效低频（<60 Hz）
 cfg.sweepFreqEndHz = 800;          % 扫频信号终止频率（Hz）；覆盖 ANC 主要工作带宽
 
-% 需确保 click_offset_sec < padLeading
-cfg.click_offset_sec = 0.001;       % Click 提前扫频开始的时间（秒），建议 0.5~2 ms
-
 cfg.channel_out = 1;
 cfg.channel_in = 1;
 cfg.applyNoiseGate = false;         % 轻微噪声抑制开关 抑制尾部噪声，减少预回声
@@ -125,7 +127,7 @@ cfg.maxTotalDelaySec = 1.0;         % 最大物理延迟(秒)
 cfg.minSnrForReliable = 3; 
 cfg.spkAmplitude      = [0.9, 0.9];            % 播放扫频信号时各扬声器的增益（>1 表示数字域放大，需注意不削波）          
 cfg.timeFrameSamples  = 1024;                  % 录音/播放缓冲区帧大小（必须是 2 的幂）
-cfg.preRollFrames     = 20;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
+cfg.preRollFrames     = 4;                    % 开始正式记录前的预热帧数（丢弃初始不稳定数据）
 cfg.tailNoiseLen      = 512;                   % 用于估计噪声底噪的尾部静音段长度（样本）
 cfg.saveFirstRaw      = true;                  % 是否保存第一次原始录音（用于调试）
 cfg.saveAllRaw        = true;                  % 是否保存所有重复的原始录音（占用磁盘空间）
@@ -164,7 +166,7 @@ cfg.deconvDebugMode       = true;                % ✅ 新增：启用deconvolve
 % 在 anc_config.m 中添加
 cfg.minPhysDelaySamples = 50;           % 2ms = 96样本 最小物理延迟（样本）
 cfg.maxPhysDelaySamples = 10000;        % 修复：最大物理延迟从5000增加到10000样本（约208ms），适应更长延迟
-cfg.delaySearchRadius = 500;            % 延迟搜索半径（样本）
+cfg.maxSearchSamples = 500;            % 延迟搜索半径（样本）
 cfg.peakRefineRadius = 150;             % 峰值细化半径（样本）
 cfg.peakRefineEnable = true;            % 峰值优化
 % 预回声容忍度分级
